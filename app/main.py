@@ -337,7 +337,7 @@ def match_pattern(input_line: str, pattern: str) -> bool:
         for start_pos in range(n + 1):
             initial_state = MatchState(start_pos, {})
             states = matcher.match(input_line, initial_state)
-            if any(s.pos >= start_pos for s in states):
+            if states:
                 return True
         return False
     except ValueError as e:
@@ -346,14 +346,22 @@ def match_pattern(input_line: str, pattern: str) -> bool:
 
 
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] != "-E":
-        print("Usage: ./your_program.py -E <pattern>", file=sys.stderr)
+    if len(sys.argv) != 4 or sys.argv[1] != "-E":
+        print("Usage: ./your_program.py -E <pattern> <filename>", file=sys.stderr)
         sys.exit(1)
 
     pattern = sys.argv[2]
-    input_line = sys.stdin.read().rstrip('\n')
+    filename = sys.argv[3]
+
+    try:
+        with open(filename, 'r') as f:
+            input_line = f.read().rstrip('\n')
+    except IOError as e:
+        print(f"Error reading file: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if match_pattern(input_line, pattern):
+        print(input_line)
         sys.exit(0)
     else:
         sys.exit(1)
