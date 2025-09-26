@@ -1,81 +1,101 @@
 import sys
 
-def tokenize(pattern: str):
+def match_token(token, ch):
+    """Match a single character against a token."""
+    ttype, val = token
+    if ttype == "LITERAL":
+        return ch == val
+    elif ttype == "DOT":
+        return True
+    elif ttype == "DIGIT":
+        return ch.isdigit()
+    elif ttype == "WORD":
+        return ch.isalnum() or ch == "_"
+    elif ttype == "CLASS":
+        return ch in val
+    elif ttype == "NEG_CLASS":
+        return ch not in val
+    return False
+
+
+def tokenize(pattern):
+    """Convert pattern into tokens for matching."""
     tokens = []
     i = 0
-    # Handle ^ at beginning
-    if pattern.startswith("^"):
-        tokens.append(("ANCHOR_START", None))
-        i = 1
     while i < len(pattern):
-        if pattern[i] == "\\" and i + 1 < len(pattern):
-            tokens.append(("ESC", pattern[i+1]))
-            i += 2
-        elif pattern[i] == "[":
-            end = pattern.find("]", i)
-            if end == -1:
-                raise RuntimeError("Unclosed [ in pattern")
-            content = pattern[i+1:end]
-            if content.startswith("^"):
-                tokens.append(("NEG_GROUP", set(content[1:])))
+        c = pattern[i]
+        if c == "\\" and i + 1 < len(pattern):
+            nxt = pattern[i + 1]
+            if nxt == "d":
+                tokens.append(("DIGIT", None))
+            elif nxt == "w":
+                tokens.append(("WORD", None))
             else:
-                tokens.append(("POS_GROUP", set(content)))
-            i = end + 1
-        elif pattern[i] == "$" and i == len(pattern) - 1:
-            tokens.append(("ANCHOR_END", None))
+                tokens.append(("LITERAL", nxt))
+            i += 2
+        elif c == ".":
+            tokens.append(("DOT", None))
             i += 1
-        elif pattern[i] == "+":
+        elif c == "[":
+            j = i + 1
+            neg = False
+            if j < len(pattern) and pattern[j] == "^":
+                neg = True
+                j += 1
+            chars = []
+            while j < len(pattern) and pattern[j] != "]":
+                chars.append(pattern[j])
+                j += 1
+            if neg:
+                tokens.append(("NEG_CLASS", "".join(chars)))
+            else:
+                tokens.append(("CLASS", "".join(chars)))
+            i = j + 1
+        elif c == "^":
+            tokens.append(("START", None))
+            i += 1
+        elif c == "$":
+            tokens.append(("END", None))
+            i += 1
+        elif c == "+":
             if not tokens:
-                raise RuntimeError("Nothing before + quantifier")
+                raise ValueError("Nothing to repeat for +")
             prev = tokens.pop()
             tokens.append(("PLUS", prev))
             i += 1
         else:
-            tokens.append(("LIT", pattern[i]))
+            tokens.append(("LITERAL", c))
             i += 1
     return tokens
 
-def match_token(token, ch):
-    ttype, val = token
-    if ttype == "LIT":
-        return ch == val
-    if ttype == "ESC":
-        if val == "d":
-            return ch.isdigit()
-        if val == "w":
-            return ch.isalnum() or ch == "_"
-        return ch == val
-    if ttype == "POS_GROUP":
-        return ch in val
-    if ttype == "NEG_GROUP":
-        return ch not in val
-    return False
 
 def match_here(tokens, s, idx):
+    """Try matching tokens starting at s[idx:]."""
     if not tokens:
         return idx == len(s)
 
     ttype, val = tokens[0]
 
-    if ttype == "ANCHOR_END":
-        return idx == len(s)
+    if ttype == "START":
+        return idx == 0 and match_here(tokens[1:], s, idx)
+
+    if ttype == "END":
+        return idx == len(s) and match_here(tokens[1:], s, idx)
 
     if ttype == "PLUS":
         inner = val
-        # Must match at least once
+        # Require at least one match
         if idx >= len(s) or not match_token(inner, s[idx]):
             return False
 
-        # Find the max run of this token
         j = idx
         while j < len(s) and match_token(inner, s[j]):
             j += 1
 
-        # Try every possible split length (backtracking)
-        for k in range(idx + 1, j + 1):
+        # Try all splits (greedy but with backtracking)
+        for k in range(j, idx, -1):
             if match_here(tokens[1:], s, k):
                 return True
-
         return False
 
     if idx < len(s) and match_token((ttype, val), s[idx]):
@@ -83,30 +103,26 @@ def match_here(tokens, s, idx):
 
     return False
 
-def match_pattern(input_line, pattern):
-    tokens = tokenize(pattern)
-    anchored_start = tokens and tokens[0][0] == "ANCHOR_START"
-    if anchored_start:
-        tokens = tokens[1:]
-        return match_here(tokens, input_line, 0)
 
-    for start in range(len(input_line) + 1):
-        if match_here(tokens, input_line, start):
+def match(tokens, s):
+    if tokens and tokens[0][0] == "START":
+        return match_here(tokens, s, 0)
+    for i in range(len(s) + 1):
+        if match_here(tokens, s, i):
             return True
     return False
 
-def main():
-    if len(sys.argv) < 3 or sys.argv[1] != "-E":
-        print("Expected first argument to be '-E'")
-        exit(1)
-
-    pattern = sys.argv[2]
-    input_line = sys.stdin.read()
-
-    if match_pattern(input_line, pattern):
-        exit(0)
-    else:
-        exit(1)
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) != 3 or sys.argv[1] != "-E":
+        print("Usage: ./your_program.sh -E <pattern>")
+        sys.exit(1)
+
+    pattern = sys.argv[2]
+    input_text = sys.stdin.read()
+
+    tokens = tokenize(pattern)
+    if match(tokens, input_text):
+        sys.exit(0)
+    else:
+        sys.exit(1)
