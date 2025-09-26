@@ -3,12 +3,15 @@ import sys
 def tokenize(pattern: str):
     tokens = []
     i = 0
+    # Handle ^ at beginning
+    if pattern.startswith("^"):
+        tokens.append(("ANCHOR_START", None))
+        i = 1
     while i < len(pattern):
         if pattern[i] == "\\" and i + 1 < len(pattern):
             tokens.append(("ESC", pattern[i+1]))
             i += 2
         elif pattern[i] == "[":
-            # find closing bracket
             end = pattern.find("]", i)
             if end == -1:
                 raise RuntimeError("Unclosed [ in pattern")
@@ -32,28 +35,41 @@ def match_token(token, ch):
             return ch.isdigit()
         if val == "w":
             return ch.isalnum() or ch == "_"
-        # fallback: literal match
         return ch == val
     if ttype == "POS_GROUP":
         return ch in val
     if ttype == "NEG_GROUP":
         return ch not in val
-    return False
+    raise RuntimeError(f"Unexpected token type: {ttype}")
 
 def match_pattern(input_line, pattern):
     tokens = tokenize(pattern)
+
+    anchored = tokens and tokens[0][0] == "ANCHOR_START"
+    if anchored:
+        tokens = tokens[1:]  # drop the anchor
+
     n, m = len(input_line), len(tokens)
 
-    # try every starting index
-    for start in range(n - m + 1):
-        ok = True
+    if anchored:
+        # must match at beginning
+        if m > n:
+            return False
         for j, token in enumerate(tokens):
-            if not match_token(token, input_line[start + j]):
-                ok = False
-                break
-        if ok:
-            return True
-    return False
+            if not match_token(token, input_line[j]):
+                return False
+        return True
+    else:
+        # try all possible start positions
+        for start in range(n - m + 1):
+            ok = True
+            for j, token in enumerate(tokens):
+                if not match_token(token, input_line[start + j]):
+                    ok = False
+                    break
+            if ok:
+                return True
+        return False
 
 def main():
     if len(sys.argv) < 3 or sys.argv[1] != "-E":
