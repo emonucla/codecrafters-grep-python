@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import sys
 
 def match_token(token, ch):
@@ -26,18 +25,12 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
     n = len(pattern)
     while i < n:
         c = pattern[i]
-
         if c == "\\" and i + 1 < n:
             nxt = pattern[i + 1]
             if nxt.isdigit():
-                j = i + 1
-                digits = []
-                while j < n and pattern[j].isdigit():
-                    digits.append(pattern[j])
-                    j += 1
-                group_num = int("".join(digits))
+                group_num = int(nxt)
                 current_alt.append(("BACKREF", group_num))
-                i = j
+                i += 2
                 continue
             elif nxt == "d":
                 current_alt.append(("DIGIT", None))
@@ -47,37 +40,25 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
                 current_alt.append(("WORD", None))
                 i += 2
                 continue
-            elif nxt == "\\":
-                current_alt.append(("LITERAL", "\\"))
-                i += 2
-                continue
             else:
                 current_alt.append(("LITERAL", nxt))
                 i += 2
                 continue
-
         elif c == ".":
             current_alt.append(("DOT", None))
             i += 1
             continue
-
         elif c == "[":
             j = i + 1
-            if j >= n:
-                raise ValueError("Unclosed character class")
             neg = False
-            if pattern[j] == "^":
+            if j < n and pattern[j] == "^":
                 neg = True
                 j += 1
             chars = []
             k = j
             while k < n and pattern[k] != "]":
-                if pattern[k] == "\\" and k + 1 < n:
-                    chars.append(pattern[k+1])
-                    k += 2
-                else:
-                    chars.append(pattern[k])
-                    k += 1
+                chars.append(pattern[k])
+                k += 1
             if k == n:
                 raise ValueError("Unclosed character class")
             val = "".join(chars)
@@ -87,17 +68,14 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
                 current_alt.append(("CLASS", val))
             i = k + 1
             continue
-
         elif c == "^":
             current_alt.append(("START", None))
             i += 1
             continue
-
         elif c == "$":
             current_alt.append(("END", None))
             i += 1
             continue
-
         elif c == "+":
             if not current_alt:
                 raise ValueError("Nothing to repeat for +")
@@ -105,7 +83,6 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
             current_alt.append(("PLUS", prev))
             i += 1
             continue
-
         elif c == "?":
             if not current_alt:
                 raise ValueError("Nothing to repeat for ?")
@@ -113,40 +90,36 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
             current_alt.append(("QUESTION", prev))
             i += 1
             continue
-
         elif c == "|":
+            if not current_alt:
+                raise ValueError("Empty alternative")
             alts.append([])
             current_alt = alts[-1]
             i += 1
             continue
-
         elif c == "(":
             group_id = next_group[0]
             next_group[0] += 1
-            sub_alts, new_i, next_group = parse_subpattern(
-                pattern, i + 1, expect_close=True, next_group=next_group
-            )
-            if len(sub_alts) == 1:
-                sub_tokens = sub_alts[0]
-            else:
-                sub_tokens = [("OR", sub_alts)]
+            sub_alts, new_i, next_group = parse_subpattern(pattern, i + 1, expect_close=True, next_group=next_group)
+            sub_tokens = sub_alts[0] if len(sub_alts) == 1 else [("OR", sub_alts)]
             current_alt.append(("CAPTURE", (group_id, sub_tokens)))
             i = new_i
             continue
-
         elif c == ")":
             if not expect_close:
                 current_alt.append(("LITERAL", ")"))
                 i += 1
                 continue
+            if not current_alt:
+                raise ValueError("Empty alternative at end")
             return alts, i + 1, next_group
-
         else:
             current_alt.append(("LITERAL", c))
             i += 1
-
     if expect_close:
         raise ValueError("Unclosed group")
+    if not current_alt:
+        raise ValueError("Empty pattern")
     return alts, i, next_group
 
 
@@ -183,8 +156,12 @@ def match_here(tokens, s, idx, captures):
             return None
         sub_pos, sub_captures = sub_res
         new_captures = sub_captures.copy()
-        new_captures[group_id] = s[idx:sub_pos]  # store resolved string
-        return match_here(tokens[1:], s, sub_pos, new_captures)
+        # ✅ store substring instead of (start, end)
+        new_captures[group_id] = s[idx:sub_pos]
+        rest_res = match_here(tokens[1:], s, sub_pos, new_captures)
+        if rest_res is not None:
+            return rest_res
+        return None
 
     if ttype == "BACKREF":
         group_num = val
@@ -192,9 +169,9 @@ def match_here(tokens, s, idx, captures):
             return None
         captured_str = captures[group_num]
         clen = len(captured_str)
-        if s.startswith(captured_str, idx):
-            return match_here(tokens[1:], s, idx + clen, captures)
-        return None
+        if idx + clen > n or s[idx:idx + clen] != captured_str:
+            return None
+        return match_here(tokens[1:], s, idx + clen, captures)
 
     if ttype == "PLUS":
         inner = val
@@ -211,11 +188,16 @@ def match_here(tokens, s, idx, captures):
 
     if ttype == "QUESTION":
         inner = val
+        # Try one first (greedy)
         if idx < n and match_token(inner, s[idx]):
             rest_res = match_here(tokens[1:], s, idx + 1, captures)
             if rest_res is not None:
                 return rest_res
-        return match_here(tokens[1:], s, idx, captures)
+        # Try zero
+        rest_res = match_here(tokens[1:], s, idx, captures)
+        if rest_res is not None:
+            return rest_res
+        return None
 
     if ttype == "OR":
         for alt in val:
@@ -227,17 +209,19 @@ def match_here(tokens, s, idx, captures):
                     return rest_res
         return None
 
+    # Normal token match
     if idx >= n or not match_token((ttype, val), s[idx]):
         return None
     return match_here(tokens[1:], s, idx + 1, captures)
 
 
 def match(tokens, s):
+    n = len(s)
     res = match_here(tokens, s, 0, {})
     if res is None:
         return False
     pos, _ = res
-    return pos == len(s)
+    return pos == n
 
 
 if __name__ == "__main__":
