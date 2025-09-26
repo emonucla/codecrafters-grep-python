@@ -27,14 +27,22 @@ def parse_subpattern(pattern, start, expect_close=False):
         c = pattern[i]
         if c == "\\" and i + 1 < n:
             nxt = pattern[i + 1]
-            if nxt == "d":
+            if nxt == "1":
+                current_alt.append(("BACKREF", 1))
+                i += 2
+                continue
+            elif nxt == "d":
                 current_alt.append(("DIGIT", None))
+                i += 2
+                continue
             elif nxt == "w":
                 current_alt.append(("WORD", None))
+                i += 2
+                continue
             else:
                 current_alt.append(("LITERAL", nxt))
-            i += 2
-            continue
+                i += 2
+                continue
         elif c == ".":
             current_alt.append(("DOT", None))
             i += 1
@@ -90,7 +98,8 @@ def parse_subpattern(pattern, start, expect_close=False):
             continue
         elif c == "(":
             sub_alts, new_i = parse_subpattern(pattern, i + 1, expect_close=True)
-            current_alt.append(("OR", sub_alts))
+            sub_tokens = sub_alts[0] if len(sub_alts) == 1 else [("OR", sub_alts)]
+            current_alt.append(("CAPTURE", sub_tokens))
             i = new_i
             continue
         elif c == ")":
@@ -119,19 +128,47 @@ def tokenize(pattern):
         return alts[0]
 
 
-def match_here(tokens, s, idx):
-    if not tokens:
-        return idx
+def match_here(tokens, s, idx, cs=-1, ce=-1):
     n = len(s)
+    if not tokens:
+        return idx, cs, ce
+
     ttype, val = tokens[0]
+
     if ttype == "START":
         if idx != 0:
             return None
-        return match_here(tokens[1:], s, idx)
+        return match_here(tokens[1:], s, idx, cs, ce)
+
     if ttype == "END":
         if idx != n:
             return None
-        return match_here(tokens[1:], s, idx)
+        return match_here(tokens[1:], s, idx, cs, ce)
+
+    if ttype == "CAPTURE":
+        sub_tokens = val
+        sub_pos, sub_cs, sub_ce = match_here(sub_tokens, s, idx, -1, -1)
+        if sub_pos is None:
+            return None
+        group_cs = idx
+        group_ce = sub_pos
+        rest_pos, r_cs, r_ce = match_here(tokens[1:], s, sub_pos, group_cs, group_ce)
+        if rest_pos is not None:
+            return rest_pos, group_cs, group_ce
+        return None
+
+    if ttype == "BACKREF":
+        if cs == -1 or ce == -1:
+            return None
+        captured = s[cs:ce]
+        cl = len(captured)
+        if idx + cl > n or s[idx:idx + cl] != captured:
+            return None
+        rest_pos, new_cs, new_ce = match_here(tokens[1:], s, idx + cl, cs, ce)
+        if rest_pos is not None:
+            return rest_pos, new_cs, new_ce
+        return None
+
     if ttype == "PLUS":
         inner = val
         if idx >= n or not match_token(inner, s[idx]):
@@ -140,41 +177,45 @@ def match_here(tokens, s, idx):
         while j < n and match_token(inner, s[j]):
             j += 1
         for k in range(j, idx, -1):
-            rest_pos = match_here(tokens[1:], s, k)
+            rest_pos, new_cs, new_ce = match_here(tokens[1:], s, k, cs, ce)
             if rest_pos is not None:
-                return rest_pos
+                return rest_pos, new_cs, new_ce
         return None
+
     if ttype == "QUESTION":
         inner = val
         if idx < n and match_token(inner, s[idx]):
-            rest_pos = match_here(tokens[1:], s, idx + 1)
+            rest_pos, new_cs, new_ce = match_here(tokens[1:], s, idx + 1, cs, ce)
             if rest_pos is not None:
-                return rest_pos
-        rest_pos = match_here(tokens[1:], s, idx)
+                return rest_pos, new_cs, new_ce
+        rest_pos, new_cs, new_ce = match_here(tokens[1:], s, idx, cs, ce)
         if rest_pos is not None:
-            return rest_pos
+            return rest_pos, new_cs, new_ce
         return None
+
     if ttype == "OR":
         for alt in val:
-            alt_end = match_here(alt, s, idx)
-            if alt_end is not None:
-                rest_pos = match_here(tokens[1:], s, alt_end)
+            alt_pos, new_cs, new_ce = match_here(alt, s, idx, cs, ce)
+            if alt_pos is not None:
+                rest_pos, r_cs, r_ce = match_here(tokens[1:], s, alt_pos, new_cs, new_ce)
                 if rest_pos is not None:
-                    return rest_pos
+                    return rest_pos, r_cs, r_ce
         return None
+
     # Normal token match
     if idx >= n or not match_token((ttype, val), s[idx]):
         return None
-    return match_here(tokens[1:], s, idx + 1)
+    return match_here(tokens[1:], s, idx + 1, cs, ce)
 
 
 def match(tokens, s):
     n = len(s)
     if tokens and tokens[0][0] == "START":
-        return match_here(tokens, s, 0) is not None
+        res = match_here(tokens, s, 0, -1, -1)
+        return res is not None
     for i in range(n + 1):
-        end_pos = match_here(tokens, s, i)
-        if end_pos is not None:
+        res = match_here(tokens, s, i, -1, -1)
+        if res is not None:
             return True
     return False
 
