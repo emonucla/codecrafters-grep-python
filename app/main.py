@@ -146,7 +146,7 @@ def tokenize(pattern):
 def match_here(tokens, s, idx, captures, open_groups):
     n = len(s)
     if not tokens:
-        return idx, captures
+        return idx, captures, open_groups
 
     ttype, val = tokens[0]
 
@@ -160,7 +160,7 @@ def match_here(tokens, s, idx, captures, open_groups):
             return None
         return match_here(tokens[1:], s, idx, captures, open_groups)
 
-    if ttype == "LITERAL" or ttype == "DOT" or ttype == "DIGIT" or ttype == "WORD" or ttype == "CLASS" or ttype == "NEG_CLASS":
+    if ttype in ("LITERAL", "DOT", "DIGIT", "WORD", "CLASS", "NEG_CLASS"):
         if idx >= n or not match_token((ttype, val), s[idx]):
             return None
         return match_here(tokens[1:], s, idx + 1, captures, open_groups)
@@ -185,63 +185,59 @@ def match_here(tokens, s, idx, captures, open_groups):
 
     if ttype == "CAPTURE":
         group_id, sub_tokens = val
-        new_open_groups = open_groups.copy()
-        new_open_groups[group_id] = idx
-        sub_res = match_here(sub_tokens, s, idx, captures, new_open_groups)
+        new_open = open_groups.copy()
+        new_open[group_id] = idx
+        sub_res = match_here(sub_tokens, s, idx, captures, new_open)
         if sub_res is None:
             return None
-        sub_pos, sub_captures = sub_res
+        sub_pos, sub_captures, sub_open = sub_res
         new_captures = sub_captures.copy()
         new_captures[group_id] = (idx, sub_pos)
-        # Remove from open_groups if present
-        new_open_groups.pop(group_id, None)
-        return match_here(tokens[1:], s, sub_pos, new_captures, new_open_groups)
+        new_open.pop(group_id, None)
+        return match_here(tokens[1:], s, sub_pos, new_captures, new_open)
 
     if ttype == "OR":
         for alt in val:
             alt_res = match_here(alt, s, idx, captures, open_groups)
             if alt_res is not None:
-                alt_pos, alt_captures = alt_res
-                rest_res = match_here(tokens[1:], s, alt_pos, alt_captures, open_groups)
+                alt_pos, alt_captures, alt_open = alt_res
+                rest_res = match_here(tokens[1:], s, alt_pos, alt_captures, alt_open)
                 if rest_res is not None:
                     return rest_res
         return None
 
     if ttype == "PLUS":
-        # Greedy backtracking for +
         inner = val
         # Minimum one
         min_res = match_here([inner], s, idx, captures, open_groups)
         if min_res is None:
             return None
-        min_pos, min_captures = min_res
-        # Now try adding more
-        current_pos = min_pos
-        current_captures = min_captures
-        possible = [(current_pos, current_captures)]
+        min_pos, min_captures, min_open = min_res
+        possible = [(min_pos, min_captures, min_open)]
+        current_pos, current_captures, current_open = min_pos, min_captures, min_open
         while True:
-            add_res = match_here([inner], s, current_pos, current_captures, open_groups)
+            add_res = match_here([inner], s, current_pos, current_captures, current_open)
             if add_res is None:
                 break
-            current_pos, current_captures = add_res
-            possible.append((current_pos, current_captures))
+            current_pos, current_captures, current_open = add_res
+            possible.append((current_pos, current_captures, current_open))
         # Backtrack from longest
-        for p_pos, p_captures in reversed(possible):
-            rest_res = match_here(tokens[1:], s, p_pos, p_captures, open_groups)
+        for p_pos, p_captures, p_open in reversed(possible):
+            rest_res = match_here(tokens[1:], s, p_pos, p_captures, p_open)
             if rest_res is not None:
                 return rest_res
         return None
 
     if ttype == "QUESTION":
-        # Greedy ? : try one first
         inner = val
+        # Try one first (greedy)
         one_res = match_here([inner], s, idx, captures, open_groups)
         if one_res is not None:
-            one_pos, one_captures = one_res
-            rest_res = match_here(tokens[1:], s, one_pos, one_captures, open_groups)
+            one_pos, one_captures, one_open = one_res
+            rest_res = match_here(tokens[1:], s, one_pos, one_captures, one_open)
             if rest_res is not None:
                 return rest_res
-        # Then zero
+        # Try zero
         return match_here(tokens[1:], s, idx, captures, open_groups)
 
     return None
@@ -249,9 +245,6 @@ def match_here(tokens, s, idx, captures, open_groups):
 
 def match(tokens, s):
     n = len(s)
-    if isinstance(tokens, list) and tokens and tokens[0][0] == "START":
-        res = match_here(tokens, s, 0, {}, {})
-        return res is not None and (res[0] == n if res else False)
     for i in range(n + 1):
         res = match_here(tokens, s, i, {}, {})
         if res is not None:
