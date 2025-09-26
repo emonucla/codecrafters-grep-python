@@ -74,9 +74,7 @@ class SequenceMatcher(Matcher):
 
     def __str__(self) -> str:
         return (
-            "SequenceMatcher("
-            + ", ".join(str(matcher) for matcher in self.matchers)
-            + ")"
+            "SequenceMatcher(" + ", ".join(str(matcher) for matcher in self.matchers) + ")"
         )
 
 
@@ -203,7 +201,7 @@ class CaptureGroupMatcher(Matcher):
         result = set()
         for next_state in next_states:
             new_groups = dict(next_state.groups)
-            captured = line[state.pos : next_state.pos]
+            captured = line[state.pos: next_state.pos]
             new_groups[self.group_id] = captured
             result.add(MatchState(next_state.pos, new_groups))
         return result
@@ -220,7 +218,7 @@ class BackreferenceMatcher(Matcher):
         if self.group_id in state.groups:
             group_match = state.groups[self.group_id]
             match_len = len(group_match)
-            if state.pos + match_len <= len(line) and line[state.pos : state.pos + match_len] == group_match:
+            if state.pos + match_len <= len(line) and line[state.pos: state.pos + match_len] == group_match:
                 return {MatchState(state.pos + match_len, dict(state.groups))}
         return set()
 
@@ -343,7 +341,7 @@ class PatternParser:
                 c = self.advance()
             charset.add(c)
         if self.advance() != "]":
-            raise ValueError("Expected closing bracket ']'")
+            raise ValueError("Expected closing bracket ']' ")
         return CharClassMatcher(charset, is_negated)
 
 
@@ -373,13 +371,19 @@ def main():
 
     try:
         with open(filename, 'r') as f:
-            input_line = f.read().rstrip('\n')
+            lines = f.readlines()
     except IOError as e:
         print(f"Error reading file: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if match_pattern(input_line, pattern):
-        print(input_line)
+    matched = False
+    for line in lines:
+        line = line.rstrip('\n')
+        if match_pattern(line, pattern):
+            print(line)
+            matched = True
+
+    if matched:
         sys.exit(0)
     else:
         sys.exit(1)
