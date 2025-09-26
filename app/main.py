@@ -18,100 +18,6 @@ def match_token(token, ch):
     return False
 
 
-def match_node(node, s, idx, captures):
-    n = len(s)
-    ttype, val = node
-    if ttype == "START":
-        if idx != 0:
-            return None
-        return idx, captures
-    if ttype == "END":
-        if idx != n:
-            return None
-        return idx, captures
-    if ttype in ["LITERAL", "DOT", "DIGIT", "WORD", "CLASS", "NEG_CLASS"]:
-        if idx >= n or not match_token(node, s[idx]):
-            return None
-        return idx + 1, captures
-    if ttype == "BACKREF":
-        group_num = val
-        if group_num not in captures:
-            return None
-        cap_start, cap_end = captures[group_num]
-        clen = cap_end - cap_start
-        if idx + clen > n or s[idx:idx + clen] != s[cap_start:cap_end]:
-            return None
-        return idx + clen, captures
-    if ttype == "CAPTURE":
-        group_id, sub_tokens = val
-        sub_res = match_here(sub_tokens, s, idx, captures)
-        if sub_res is None:
-            return None
-        sub_pos, sub_captures = sub_res
-        new_captures = sub_captures.copy()
-        new_captures[group_id] = (idx, sub_pos)
-        return sub_pos, new_captures
-    if ttype == "OR":
-        for alt in val:
-            alt_res = match_here(alt, s, idx, captures)
-            if alt_res is not None:
-                return alt_res
-        return None
-    return None
-
-
-def match_here(tokens, s, idx, captures):
-    n = len(s)
-    if not tokens:
-        return idx, captures
-
-    node = tokens[0]
-    ttype, val = node
-
-    if ttype == "PLUS":
-        inner = val
-        res = match_node(inner, s, idx, captures)
-        if res is None:
-            return None
-        pos, cap = res
-        possible = [(pos, cap)]
-        while True:
-            next_res = match_node(inner, s, pos, cap)
-            if next_res is None:
-                break
-            pos, cap = next_res
-            possible.append((pos, cap))
-        for p_pos, p_cap in reversed(possible):
-            rest_res = match_here(tokens[1:], s, p_pos, p_cap)
-            if rest_res is not None:
-                return rest_res
-        return None
-
-    if ttype == "QUESTION":
-        inner = val
-        res = match_node(inner, s, idx, captures)
-        if res is not None:
-            q_pos, q_cap = res
-            rest_res = match_here(tokens[1:], s, q_pos, q_cap)
-            if rest_res is not None:
-                return rest_res
-        return match_here(tokens[1:], s, idx, captures)
-
-    res = match_node(node, s, idx, captures)
-    if res is None:
-        return None
-    new_idx, new_captures = res
-    return match_here(tokens[1:], s, new_idx, new_captures)
-
-
-def match(tokens, s):
-    res = match_here(tokens, s, 0, {})
-    if res is None:
-        return False
-    pos, _ = res
-    return pos == len(s)
-
-
 def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
     alts = [[]]
     current_alt = alts[0]
@@ -155,8 +61,12 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
             chars = []
             k = j
             while k < n and pattern[k] != "]":
-                chars.append(pattern[k])
-                k += 1
+                if pattern[k] == "\\" and k + 1 < n:
+                    chars.append(pattern[k + 1])
+                    k += 2
+                else:
+                    chars.append(pattern[k])
+                    k += 1
             if k == n:
                 raise ValueError("Unclosed character class")
             val = "".join(chars)
@@ -199,7 +109,10 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
             group_id = next_group[0]
             next_group[0] += 1
             sub_alts, new_i, next_group = parse_subpattern(pattern, i + 1, expect_close=True, next_group=next_group)
-            sub_tokens = sub_alts[0] if len(sub_alts) == 1 else [("OR", sub_alts)]
+            if len(sub_alts) > 1:
+                sub_tokens = [("OR", sub_alts)]
+            else:
+                sub_tokens = sub_alts[0]
             current_alt.append(("CAPTURE", (group_id, sub_tokens)))
             i = new_i
             continue
@@ -230,16 +143,136 @@ def tokenize(pattern):
         return alts[0]
 
 
+def match_here(tokens, s, idx, captures, open_groups):
+    n = len(s)
+    if not tokens:
+        return idx, captures
+
+    ttype, val = tokens[0]
+
+    if ttype == "START":
+        if idx != 0:
+            return None
+        return match_here(tokens[1:], s, idx, captures, open_groups)
+
+    if ttype == "END":
+        if idx != n:
+            return None
+        return match_here(tokens[1:], s, idx, captures, open_groups)
+
+    if ttype == "LITERAL" or ttype == "DOT" or ttype == "DIGIT" or ttype == "WORD" or ttype == "CLASS" or ttype == "NEG_CLASS":
+        if idx >= n or not match_token((ttype, val), s[idx]):
+            return None
+        return match_here(tokens[1:], s, idx + 1, captures, open_groups)
+
+    if ttype == "BACKREF":
+        group_num = val
+        if group_num in captures:
+            cap_start, cap_end = captures[group_num]
+            captured_str = s[cap_start:cap_end]
+            clen = len(captured_str)
+            if idx + clen > n or s[idx:idx + clen] != captured_str:
+                return None
+            return match_here(tokens[1:], s, idx + clen, captures, open_groups)
+        elif group_num in open_groups:
+            cap_start = open_groups[group_num]
+            plen = idx - cap_start
+            if idx + plen > n or s[idx:idx + plen] != s[cap_start:cap_start + plen]:
+                return None
+            return match_here(tokens[1:], s, idx + plen, captures, open_groups)
+        else:
+            return None
+
+    if ttype == "CAPTURE":
+        group_id, sub_tokens = val
+        new_open_groups = open_groups.copy()
+        new_open_groups[group_id] = idx
+        sub_res = match_here(sub_tokens, s, idx, captures, new_open_groups)
+        if sub_res is None:
+            return None
+        sub_pos, sub_captures = sub_res
+        new_captures = sub_captures.copy()
+        new_captures[group_id] = (idx, sub_pos)
+        # Remove from open_groups if present
+        new_open_groups.pop(group_id, None)
+        return match_here(tokens[1:], s, sub_pos, new_captures, new_open_groups)
+
+    if ttype == "OR":
+        for alt in val:
+            alt_res = match_here(alt, s, idx, captures, open_groups)
+            if alt_res is not None:
+                alt_pos, alt_captures = alt_res
+                rest_res = match_here(tokens[1:], s, alt_pos, alt_captures, open_groups)
+                if rest_res is not None:
+                    return rest_res
+        return None
+
+    if ttype == "PLUS":
+        # Greedy backtracking for +
+        inner = val
+        # Minimum one
+        min_res = match_here([inner], s, idx, captures, open_groups)
+        if min_res is None:
+            return None
+        min_pos, min_captures = min_res
+        # Now try adding more
+        current_pos = min_pos
+        current_captures = min_captures
+        possible = [(current_pos, current_captures)]
+        while True:
+            add_res = match_here([inner], s, current_pos, current_captures, open_groups)
+            if add_res is None:
+                break
+            current_pos, current_captures = add_res
+            possible.append((current_pos, current_captures))
+        # Backtrack from longest
+        for p_pos, p_captures in reversed(possible):
+            rest_res = match_here(tokens[1:], s, p_pos, p_captures, open_groups)
+            if rest_res is not None:
+                return rest_res
+        return None
+
+    if ttype == "QUESTION":
+        # Greedy ? : try one first
+        inner = val
+        one_res = match_here([inner], s, idx, captures, open_groups)
+        if one_res is not None:
+            one_pos, one_captures = one_res
+            rest_res = match_here(tokens[1:], s, one_pos, one_captures, open_groups)
+            if rest_res is not None:
+                return rest_res
+        # Then zero
+        return match_here(tokens[1:], s, idx, captures, open_groups)
+
+    return None
+
+
+def match(tokens, s):
+    n = len(s)
+    if isinstance(tokens, list) and tokens and tokens[0][0] == "START":
+        res = match_here(tokens, s, 0, {}, {})
+        return res is not None and (res[0] == n if res else False)
+    for i in range(n + 1):
+        res = match_here(tokens, s, i, {}, {})
+        if res is not None:
+            return True
+    return False
+
+
 if __name__ == "__main__":
     if len(sys.argv) != 3 or sys.argv[1] != "-E":
         print("Usage: ./your_program.py -E <pattern>")
         sys.exit(1)
 
     pattern = sys.argv[2]
-    input_text = sys.stdin.read().rstrip('\n')  # Remove trailing newline if any
+    input_text = sys.stdin.read().rstrip('\n')
 
-    tokens = tokenize(pattern)
-    if match(tokens, input_text):
-        sys.exit(0)
-    else:
+    try:
+        tokens = tokenize(pattern)
+        if match(tokens, input_text):
+            sys.exit(0)
+        else:
+            sys.exit(1)
+    except ValueError as e:
+        print(f"Error parsing pattern: {e}", file=sys.stderr)
         sys.exit(1)
