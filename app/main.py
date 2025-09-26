@@ -1,12 +1,8 @@
 import sys
 from abc import ABC, abstractmethod
-from typing import Set, List, Type, Optional, Dict
+from typing import Set, List, Optional, Dict
 from dataclasses import dataclass, field
 from copy import deepcopy
-
-# import pyparsing - available if you need it!
-# import lark - available if you need it!
-
 
 @dataclass
 class MatchState:
@@ -65,9 +61,6 @@ class WordMatcher(Matcher):
 class SequenceMatcher(Matcher):
     def __init__(self, matchers: List[Matcher]):
         self.matchers = matchers
-
-    def add_matcher(self, matcher: Matcher):
-        self.matchers.append(matcher)
 
     def match(self, line: str, state: MatchState) -> Set[MatchState]:
         states = {state}
@@ -161,7 +154,7 @@ class AnyMatcher(Matcher):
 
 
 class CharClassMatcher(Matcher):
-    def __init__(self, charset: List[str], is_negated: bool):
+    def __init__(self, charset: set, is_negated: bool):
         self.charset = charset
         self.is_negated = is_negated
 
@@ -169,12 +162,9 @@ class CharClassMatcher(Matcher):
         if state.pos >= len(line):
             return set()
         ch = line[state.pos]
-        if self.is_negated:
-            if ch not in self.charset:
-                return {MatchState(state.pos + 1, state.groups)}
-        else:
-            if ch in self.charset:
-                return {MatchState(state.pos + 1, state.groups)}
+        matches = (ch not in self.charset) if self.is_negated else (ch in self.charset)
+        if matches:
+            return {MatchState(state.pos + 1, state.groups)}
         return set()
 
     def __str__(self) -> str:
@@ -190,7 +180,7 @@ class CaptureGroupMatcher(Matcher):
         next_states = self.matcher.match(line, state)
         result = set()
         for next_state in next_states:
-            new_groups = dict(next_state.groups)
+            new_groups = dict(next_state.groups)  # Deep copy to avoid mutation
             new_groups[self.group_id] = line[state.pos:next_state.pos]
             result.add(MatchState(next_state.pos, new_groups))
         return result
@@ -235,7 +225,7 @@ class PatternParser:
     def parse(self) -> Matcher:
         res = self.parse_expression()
         if self.peek() is not None:
-            raise ValueError("Unexpected characters")
+            raise ValueError("Unexpected characters at end of pattern")
         return res
 
     def parse_expression(self) -> Matcher:
@@ -252,15 +242,18 @@ class PatternParser:
             parts.append(self.parse_factor())
         if len(parts) == 1:
             return parts[0]
-        return SequenceMatcher(parts)
+        elif len(parts) > 1:
+            return SequenceMatcher(parts)
+        raise ValueError("Empty term")
 
     def parse_factor(self) -> Matcher:
         atom = self.parse_atom()
-        if (quantifier := self.peek()) in ["?", "+"]:
+        quantifier = self.peek()
+        if quantifier in ["?", "+"]:
             self.advance()
             if quantifier == "?":
                 return OptionalMatcher(atom)
-            if quantifier == "+":
+            elif quantifier == "+":
                 return PlusMatcher(atom)
         return atom
 
@@ -272,20 +265,17 @@ class PatternParser:
         if c == "^":
             self.advance()
             return AnchorStartMatcher()
-
         if c == "$":
             self.advance()
             return AnchorEndMatcher()
-
         if c == ".":
             self.advance()
             return AnyMatcher()
-
         if c == "\\":
             self.advance()
             next_c = self.advance()
             if next_c is None:
-                raise ValueError("Incomplete escape")
+                raise ValueError("Incomplete escape sequence")
             if next_c.isdigit():
                 return BackreferenceMatcher(int(next_c))
             if next_c == "d":
@@ -293,51 +283,54 @@ class PatternParser:
             if next_c == "w":
                 return WordMatcher()
             return LiteralMatcher(next_c)
-
         if c == "[":
             return self.parse_charset()
-
         if c == "(":
             self.advance()
             group_id = self.next_group_id
             self.next_group_id += 1
-
             expr = self.parse_expression()
             if self.advance() != ")":
-                raise ValueError("Expected ')'")
-
+                raise ValueError("Expected closing parenthesis ')'")
             return CaptureGroupMatcher(expr, group_id)
-
+        # Literal
         return LiteralMatcher(self.advance())
 
     def parse_charset(self) -> Matcher:
-        self.advance()  # consume [
+        self.advance()  # Consume [
         is_negated = False
         if self.peek() == "^":
             is_negated = True
             self.advance()
-        charset = []
+        charset = set()
         while (c := self.peek()) is not None and c != "]":
-            charset.append(self.advance())
+            escaped_char = self.advance()
+            if escaped_char == "\\" and self.peek() is not None:
+                escaped_char = self.advance()  # Handle escaped chars in class
+            charset.add(escaped_char)
         if self.advance() != "]":
-            raise ValueError("Expected ']'")
+            raise ValueError("Expected closing bracket ']'")
         return CharClassMatcher(charset, is_negated)
 
 
 def match_pattern(input_line: str, pattern: str) -> bool:
-    parser = PatternParser(pattern)
-    matcher = parser.parse()
-    states = matcher.match(input_line, MatchState(0, {}))
-    return any(s.pos == len(input_line) for s in states)
+    try:
+        parser = PatternParser(pattern)
+        matcher = parser.parse()
+        states = matcher.match(input_line, MatchState(0, {}))
+        return any(s.pos == len(input_line) for s in states)
+    except ValueError as e:
+        print(f"Pattern parsing error: {e}", file=sys.stderr)
+        return False
 
 
 def main():
     if len(sys.argv) != 3 or sys.argv[1] != "-E":
-        print("Usage: ./your_program.py -E <pattern>")
+        print("Usage: ./your_program.py -E <pattern>", file=sys.stderr)
         sys.exit(1)
 
     pattern = sys.argv[2]
-    input_line = sys.stdin.read()
+    input_line = sys.stdin.read().strip()  # Strip trailing newline
 
     if match_pattern(input_line, pattern):
         sys.exit(0)
