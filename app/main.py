@@ -12,6 +12,11 @@ def match_pattern(input_line, pattern):
      # Handle \w (word character class: a-z, A-Z, 0-9, _)
     if pattern == r"\w":
         return any(ch.isalnum() or ch == "_" for ch in input_line)
+    
+    # Handle positive character groups like [abc]
+    if pattern.startswith("[") and pattern.endswith("]"):
+        allowed = set(pattern[1:-1])  # characters inside brackets
+        return any(ch in allowed for ch in input_line)
 
     # Handle single literal character
     if len(pattern) == 1:
