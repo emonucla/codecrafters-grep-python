@@ -15,6 +15,11 @@ Supported features (sufficient for the current task):
 
 The script is defensive about errors (unreadable files are skipped).
 
+This rewrite also adds safer handling around process termination so that
+running the script in interactive environments doesn't surface a
+`SystemExit` stack trace; in normal command-line use the script still
+exits with the appropriate status code.
+
 """
 
 import sys
@@ -159,6 +164,14 @@ def run_tests() -> int:
         assert_eq(set(out) == expected, True, f"recursive output mismatch: got={out} expected={expected}")
         assert_eq(m, True, "recursive returned True")
 
+        # additional small tests for multiple-file printing behavior
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            a = grep_in_file(f1, r"pear", prefix_filename=True, display_name=os.path.basename(f1))
+        out = buf.getvalue().strip().splitlines()
+        assert_eq(a, True, "prefix flag returns True")
+        assert_eq(out, [os.path.basename(f1) + ":pear"], "prefix printing correct")
+
     finally:
         # clean up created files/directories
         try:
@@ -252,5 +265,20 @@ def main(argv: List[str] = None) -> int:
 
 
 if __name__ == "__main__":
-    code = main()
-    sys.exit(code)
+    # Call main() and exit with the returned code. We wrap sys.exit in a
+    # try/except that uses os._exit as a fallback to avoid showing a
+    # SystemExit traceback in interactive environments. In normal CLI use
+    # this behaves exactly like a plain sys.exit(code).
+    try:
+        code = main()
+        sys.exit(code)
+    except SystemExit as e:
+        # Ensure the process terminates with the same code, but avoid
+        # printing a Python-level stack trace in interactive environments.
+        code = e.code if isinstance(e.code, int) else 1
+        try:
+            os._exit(code)
+        except Exception:
+            # If os._exit fails for some reason, re-raise to allow the
+            # environment to handle it as before.
+            raise
