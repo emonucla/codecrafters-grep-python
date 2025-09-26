@@ -8,6 +8,10 @@ def match_pattern(input_line, pattern):
     # Handle \d (digit class)
     if pattern == r"\d":
         return any(ch.isdigit() for ch in input_line)
+    
+     # Handle \w (word character class: a-z, A-Z, 0-9, _)
+    if pattern == r"\w":
+        return any(ch.isalnum() or ch == "_" for ch in input_line)
 
     # Handle single literal character
     if len(pattern) == 1:
