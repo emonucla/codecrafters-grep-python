@@ -151,16 +151,27 @@ def match_here(tokens, s, idx, captures):
 
     if ttype == "CAPTURE":
         group_id, sub_tokens = val
-        sub_res = match_here(sub_tokens, s, idx, captures)
-        if sub_res is None:
-            return None
-        sub_pos, sub_captures = sub_res
-        new_captures = sub_captures.copy()
-        # ✅ store substring instead of (start, end)
-        new_captures[group_id] = s[idx:sub_pos]
-        rest_res = match_here(tokens[1:], s, sub_pos, new_captures)
-        if rest_res is not None:
-            return rest_res
+
+        # Try matching sub_tokens in every possible way
+        sub_stack = [(idx, captures.copy())]
+        tried = set()
+        while sub_stack:
+            sub_idx, sub_caps = sub_stack.pop()
+            if (sub_idx, tuple(sorted(sub_caps.items()))) in tried:
+                continue
+            tried.add((sub_idx, tuple(sorted(sub_caps.items()))))
+
+            sub_res = match_here(sub_tokens, s, sub_idx, sub_caps)
+            if sub_res is None:
+                continue
+            sub_pos, sub_captures = sub_res
+            new_captures = sub_captures.copy()
+            new_captures[group_id] = s[idx:sub_pos]
+
+            rest_res = match_here(tokens[1:], s, sub_pos, new_captures)
+            if rest_res is not None:
+                return rest_res
+
         return None
 
     if ttype == "BACKREF":
