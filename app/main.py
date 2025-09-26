@@ -72,7 +72,7 @@ def tokenize(pattern):
 def match_here(tokens, s, idx):
     """Try matching tokens starting at s[idx:]."""
     if not tokens:
-        return idx == len(s)
+        return True
 
     ttype, val = tokens[0]
 
@@ -115,7 +115,7 @@ def match(tokens, s):
 
 if __name__ == "__main__":
     if len(sys.argv) != 3 or sys.argv[1] != "-E":
-        print("Usage: ./your_program.sh -E <pattern>")
+        print("Usage: ./your_program.py -E <pattern>")
         sys.exit(1)
 
     pattern = sys.argv[2]
