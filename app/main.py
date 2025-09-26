@@ -24,6 +24,12 @@ def tokenize(pattern: str):
         elif pattern[i] == "$" and i == len(pattern) - 1:
             tokens.append(("ANCHOR_END", None))
             i += 1
+        elif pattern[i] == "+":
+            if not tokens:
+                raise RuntimeError("Nothing before + quantifier")
+            prev = tokens.pop()
+            tokens.append(("PLUS", prev))
+            i += 1
         else:
             tokens.append(("LIT", pattern[i]))
             i += 1
@@ -45,53 +51,48 @@ def match_token(token, ch):
         return ch not in val
     raise RuntimeError(f"Unexpected token type: {ttype}")
 
+def match_here(tokens, s, idx):
+    """Try to match tokens against s starting at position idx."""
+    if not tokens:
+        return idx == len(s)  # must consume full string if at end
+
+    ttype, val = tokens[0]
+
+    # End anchor
+    if ttype == "ANCHOR_END":
+        return idx == len(s)
+
+    # PLUS quantifier
+    if ttype == "PLUS":
+        inner = val
+        # Must match at least once
+        if idx >= len(s) or not match_token(inner, s[idx]):
+            return False
+        j = idx
+        # Consume as many as possible
+        while j < len(s) and match_token(inner, s[j]):
+            # Try rest of pattern after consuming k chars
+            if match_here(tokens[1:], s, j + 1):
+                return True
+            j += 1
+        return False
+
+    # Normal token
+    if idx < len(s) and match_token((ttype, val), s[idx]):
+        return match_here(tokens[1:], s, idx + 1)
+    return False
+
 def match_pattern(input_line, pattern):
     tokens = tokenize(pattern)
 
     anchored_start = tokens and tokens[0][0] == "ANCHOR_START"
-    anchored_end   = tokens and tokens[-1][0] == "ANCHOR_END"
-
     if anchored_start:
         tokens = tokens[1:]
-    if anchored_end:
-        tokens = tokens[:-1]
+        return match_here(tokens, input_line, 0)
 
-    n, m = len(input_line), len(tokens)
-
-    if anchored_start and anchored_end:
-        # must match full string
-        if m != n:
-            return False
-        for j, token in enumerate(tokens):
-            if not match_token(token, input_line[j]):
-                return False
-        return True
-
-    if anchored_start:
-        if m > n:
-            return False
-        for j, token in enumerate(tokens):
-            if not match_token(token, input_line[j]):
-                return False
-        return True
-
-    if anchored_end:
-        if m > n:
-            return False
-        start = n - m
-        for j, token in enumerate(tokens):
-            if not match_token(token, input_line[start + j]):
-                return False
-        return True
-
-    # No anchors: search anywhere
-    for start in range(n - m + 1):
-        ok = True
-        for j, token in enumerate(tokens):
-            if not match_token(token, input_line[start + j]):
-                ok = False
-                break
-        if ok:
+    # Unanchored: try all start positions
+    for start in range(len(input_line) + 1):
+        if match_here(tokens, input_line, start):
             return True
     return False
 
