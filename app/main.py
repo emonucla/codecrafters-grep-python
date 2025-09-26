@@ -63,6 +63,12 @@ def tokenize(pattern):
             prev = tokens.pop()
             tokens.append(("PLUS", prev))
             i += 1
+        elif c == "?":
+            if not tokens:
+                raise ValueError("Nothing to repeat for ?")
+            prev = tokens.pop()
+            tokens.append(("QUESTION", prev))
+            i += 1
         else:
             tokens.append(("LITERAL", c))
             i += 1
@@ -96,6 +102,17 @@ def match_here(tokens, s, idx):
         for k in range(j, idx, -1):
             if match_here(tokens[1:], s, k):
                 return True
+        return False
+
+    if ttype == "QUESTION":
+        inner = val
+        # Try one first (greedy)
+        if idx < len(s) and match_token(inner, s[idx]):
+            if match_here(tokens[1:], s, idx + 1):
+                return True
+        # Try zero
+        if match_here(tokens[1:], s, idx):
+            return True
         return False
 
     if idx < len(s) and match_token((ttype, val), s[idx]):
