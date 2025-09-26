@@ -247,7 +247,7 @@ def match(tokens, s):
     n = len(s)
     for i in range(n + 1):
         res = match_here(tokens, s, i, {}, {})
-        if res is not None:
+        if res is not None and len(res[2]) == 0:
             return True
     return False
 
