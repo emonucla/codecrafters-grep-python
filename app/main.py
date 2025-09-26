@@ -16,17 +16,10 @@ def match_token(token, ch):
         return ch in val
     elif ttype == "NEG_CLASS":
         return ch not in val
-    # For tokens that are themselves token-tuples (like PLUS/QUESTION storing inner token),
-    # match_token expects a token tuple; if given here, it's an error — handled at callsite.
     return False
 
 
 def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
-    """
-    Parse pattern from `start` returning (alts, new_index, next_group_ref).
-    alts is a list of alternatives; each alternative is a list of tokens.
-    Tokens are tuples like ("LITERAL", "a"), ("CAPTURE", (id, sub_tokens)), ("BACKREF", n), etc.
-    """
     alts = [[]]
     current_alt = alts[0]
     i = start
@@ -35,7 +28,6 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
         c = pattern[i]
 
         if c == "\\" and i + 1 < n:
-            # handle escapes and multi-digit backrefs
             nxt = pattern[i + 1]
             if nxt.isdigit():
                 j = i + 1
@@ -60,7 +52,6 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
                 i += 2
                 continue
             else:
-                # Any other escaped char treated as literal (e.g. \. or \*)
                 current_alt.append(("LITERAL", nxt))
                 i += 2
                 continue
@@ -71,7 +62,6 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
             continue
 
         elif c == "[":
-            # character class
             j = i + 1
             if j >= n:
                 raise ValueError("Unclosed character class")
@@ -81,9 +71,7 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
                 j += 1
             chars = []
             k = j
-            # Support ranges like a-z? (Not implemented here — keep simple per original)
             while k < n and pattern[k] != "]":
-                # handle escaping inside class: \] or \- if present
                 if pattern[k] == "\\" and k + 1 < n:
                     chars.append(pattern[k+1])
                     k += 2
@@ -127,7 +115,6 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
             continue
 
         elif c == "|":
-            # Start a new alternative
             alts.append([])
             current_alt = alts[-1]
             i += 1
@@ -136,9 +123,9 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
         elif c == "(":
             group_id = next_group[0]
             next_group[0] += 1
-            # parse subpattern for the group
-            sub_alts, new_i, next_group = parse_subpattern(pattern, i + 1, expect_close=True, next_group=next_group)
-            # If the group has multiple alternatives, represent them with an OR token inside the capture
+            sub_alts, new_i, next_group = parse_subpattern(
+                pattern, i + 1, expect_close=True, next_group=next_group
+            )
             if len(sub_alts) == 1:
                 sub_tokens = sub_alts[0]
             else:
@@ -149,12 +136,9 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
 
         elif c == ")":
             if not expect_close:
-                # unmatched ) treated as literal (to be permissive)
                 current_alt.append(("LITERAL", ")"))
                 i += 1
                 continue
-            # closing a group
-            # ensure alternatives are not empty — allow empty alternative (which matches empty string)
             return alts, i + 1, next_group
 
         else:
@@ -176,18 +160,12 @@ def tokenize(pattern):
 
 
 def match_here(tokens, s, idx, captures):
-    """
-    Attempt to match tokens starting at s[idx].
-    `captures` is a dict mapping capture_id -> (start_idx, end_idx) relative to s.
-    Returns either (new_index, new_captures) on success or None on failure.
-    """
     n = len(s)
     if not tokens:
         return idx, captures
 
     ttype, val = tokens[0]
 
-    # Anchors
     if ttype == "START":
         if idx != 0:
             return None
@@ -198,70 +176,49 @@ def match_here(tokens, s, idx, captures):
             return None
         return match_here(tokens[1:], s, idx, captures)
 
-    # Capturing group
     if ttype == "CAPTURE":
         group_id, sub_tokens = val
-        # match the sub_tokens starting at idx; sub_tokens may produce new captures (inner groups)
         sub_res = match_here(sub_tokens, s, idx, captures)
         if sub_res is None:
             return None
         sub_pos, sub_captures = sub_res
-        # record this group's span
         new_captures = sub_captures.copy()
-        new_captures[group_id] = (idx, sub_pos)
-        # continue with rest using the updated captures
-        rest_res = match_here(tokens[1:], s, sub_pos, new_captures)
-        if rest_res is not None:
-            return rest_res
-        return None
+        new_captures[group_id] = s[idx:sub_pos]  # store resolved string
+        return match_here(tokens[1:], s, sub_pos, new_captures)
 
-    # Backreference
     if ttype == "BACKREF":
         group_num = val
         if group_num not in captures:
             return None
-        cap_start, cap_end = captures[group_num]
-        captured_str = s[cap_start:cap_end]
+        captured_str = captures[group_num]
         clen = len(captured_str)
-        if idx + clen > n or s[idx:idx + clen] != captured_str:
-            return None
-        rest_res = match_here(tokens[1:], s, idx + clen, captures)
-        if rest_res is not None:
-            return rest_res
+        if s.startswith(captured_str, idx):
+            return match_here(tokens[1:], s, idx + clen, captures)
         return None
 
-    # PLUS quantifier (one or more) - greedy then backtrack
     if ttype == "PLUS":
-        inner = val  # inner is a token tuple
-        # first ensure at least one match
-        if idx >= n or not (isinstance(inner, tuple) and match_token(inner, s[idx])):
+        inner = val
+        if idx >= n or not match_token(inner, s[idx]):
             return None
         j = idx + 1
-        # consume as many as possible
         while j < n and match_token(inner, s[j]):
             j += 1
-        # backtrack: try from longest to shortest
         for k in range(j, idx, -1):
             rest_res = match_here(tokens[1:], s, k, captures)
             if rest_res is not None:
                 return rest_res
         return None
 
-    # QUESTION quantifier (zero or one) - greedy then try zero
     if ttype == "QUESTION":
         inner = val
-        if idx < n and isinstance(inner, tuple) and match_token(inner, s[idx]):
+        if idx < n and match_token(inner, s[idx]):
             rest_res = match_here(tokens[1:], s, idx + 1, captures)
             if rest_res is not None:
                 return rest_res
-        rest_res = match_here(tokens[1:], s, idx, captures)
-        if rest_res is not None:
-            return rest_res
-        return None
+        return match_here(tokens[1:], s, idx, captures)
 
-    # OR token (top-level or inside another construct)
     if ttype == "OR":
-        for alt in val:  # val is list of alternative token-lists
+        for alt in val:
             alt_res = match_here(alt, s, idx, captures)
             if alt_res is not None:
                 alt_pos, alt_captures = alt_res
@@ -270,17 +227,12 @@ def match_here(tokens, s, idx, captures):
                     return rest_res
         return None
 
-    # Normal single-token match (LITERAL, DOT, DIGIT, WORD, CLASS, NEG_CLASS)
     if idx >= n or not match_token((ttype, val), s[idx]):
         return None
     return match_here(tokens[1:], s, idx + 1, captures)
 
 
 def match(tokens, s):
-    """
-    For now behave like full-match: entire input must be matched (pos == len(s)).
-    This mirrors the behavior in your original program.
-    """
     res = match_here(tokens, s, 0, {})
     if res is None:
         return False
