@@ -99,7 +99,7 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
             continue
         elif c == "(":
             group_id = next_group[0]
-            sub_alts, new_i, next_group = parse_subpattern(pattern, i + 1, expect_close=True, next_group)
+            sub_alts, new_i, next_group = parse_subpattern(pattern, i + 1, expect_close=True, next_group=next_group)
             sub_tokens = sub_alts[0] if len(sub_alts) == 1 else [("OR", sub_alts)]
             current_alt.append(("CAPTURE", (group_id, sub_tokens)))
             next_group[0] += 1
@@ -171,7 +171,10 @@ def match_here(tokens, s, idx, captures):
         clen = len(captured_str)
         if idx + clen > n or s[idx:idx + clen] != captured_str:
             return None
-        return match_here(tokens[1:], s, idx + clen, captures)
+        rest_res = match_here(tokens[1:], s, idx + clen, captures)
+        if rest_res is not None:
+            return rest_res
+        return None
 
     if ttype == "PLUS":
         inner = val
@@ -217,14 +220,11 @@ def match_here(tokens, s, idx, captures):
 
 def match(tokens, s):
     n = len(s)
-    if tokens and tokens[0][0] == "START":
-        res = match_here(tokens, s, 0, {})
-        return res is not None
-    for i in range(n + 1):
-        res = match_here(tokens, s, i, {})
-        if res is not None:
-            return True
-    return False
+    res = match_here(tokens, s, 0, {})
+    if res is None:
+        return False
+    pos, _ = res
+    return pos == n
 
 
 if __name__ == "__main__":
