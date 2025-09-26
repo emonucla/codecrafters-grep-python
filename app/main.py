@@ -2,28 +2,30 @@ import sys
 import re
 
 def match_pattern(input_line, pattern):
-    # Handle anchors
-    if pattern.startswith("^"):
+    # Handle anchors quickly
+    if pattern.startswith("^") or pattern.endswith("$"):
         return re.match(pattern, input_line) is not None
-    if pattern.endswith("$"):
-        return re.search(pattern + "$", input_line) is not None
 
-    # Handle basic regex with backreferences and grouping
+    # Try built-in regex first
     try:
         return re.search(pattern, input_line) is not None
     except re.error:
-        # Custom handling for simplified engine
+        # Fall back to custom simplified handling
         return custom_match(input_line, pattern)
 
 def custom_match(input_line, pattern):
-    # Only handle one capture group and one backreference for now
+    # Handle single capturing group with backreference
     if "(" in pattern and ")" in pattern and "\\1" in pattern:
-        group_pat = pattern[pattern.index("(")+1:pattern.index(")")]
-        before = pattern[:pattern.index("(")]
-        after = pattern[pattern.index(")")+1:]
+        group_start = pattern.index("(")
+        group_end = pattern.index(")")
+        group_pat = pattern[group_start+1:group_end]
 
-        # Split alternation if exists
+        before = pattern[:group_start]
+        after = pattern[group_end+1:]
+
+        # Support alternation in the group
         options = group_pat.split("|")
+
         for opt in options:
             subpat = before + f"({opt})" + after
             m = re.search(subpat, input_line)
@@ -35,10 +37,10 @@ def custom_match(input_line, pattern):
                     return True
         return False
 
-    # fallback to direct regex
+    # Otherwise fallback
     return re.search(pattern, input_line) is not None
 
-if __name__ == "__main__":
+def main():
     if len(sys.argv) < 3 or sys.argv[1] != "-E":
         print("Usage: ./your_program.sh -E <pattern>")
         sys.exit(1)
@@ -50,3 +52,6 @@ if __name__ == "__main__":
         sys.exit(0)
     else:
         sys.exit(1)
+
+if __name__ == "__main__":
+    main()
