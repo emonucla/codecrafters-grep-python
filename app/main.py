@@ -131,7 +131,7 @@ class StarMatcher(Matcher):
         self.matcher = matcher
 
     def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        states = {state}  # Start with zero matches
+        states = {state}  # zero or more
         current_states = {state}
         while current_states:
             next_states = set()
@@ -301,24 +301,21 @@ class PatternParser:
             self.advance()  # consume \
             if self.peek() is None:
                 raise ValueError("Incomplete escape sequence")
-            next_c = self.peek()
-            if next_c is not None and next_c.isdigit():
-                # Consume all consecutive digits for backreference
-                digits = ""
+            next_c = self.advance()  # consume the escape character
+            if next_c == "d":
+                return DigitMatcher()
+            elif next_c == "w":
+                return WordMatcher()
+            elif next_c.isdigit():
+                # Collect additional digits for backreference
+                digits = next_c
                 while self.peek() is not None and self.peek().isdigit():
                     digits += self.advance()
                 group_id = int(digits)
                 return BackreferenceMatcher(group_id)
-            elif next_c == "d":
-                self.advance()
-                return DigitMatcher()
-            elif next_c == "w":
-                self.advance()
-                return WordMatcher()
             else:
                 # Literal escape
-                lit = self.advance()
-                return LiteralMatcher(lit)
+                return LiteralMatcher(next_c)
         if c == "[":
             return self.parse_charset()
         if c == "(":
@@ -358,9 +355,8 @@ def match_pattern(input_line: str, pattern: str) -> bool:
         for start_pos in range(n + 1):
             initial_state = MatchState(start_pos, {})
             states = matcher.match(input_line, initial_state)
-            for s in states:
-                if s.pos > start_pos:
-                    return True
+            if states:
+                return True
         return False
     except ValueError as e:
         print(f"Pattern parsing error: {e}", file=sys.stderr)
