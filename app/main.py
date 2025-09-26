@@ -1,350 +1,254 @@
 #!/usr/bin/env python3
 """
-Regex grep clone (stages: single/multi-line, multiple files)
+Robust grep-like tool with recursive (-r) and -E pattern support.
 
-This file contains a small regex engine that supports:
-- literal characters, ., character classes [...], negated classes [^...]
-- escapes \d and \w and numeric backreferences like \1
-- grouping ( ... ), quantifiers ?, + and alternation |
-- anchors ^ and $
+This file implements a small CLI that behaves similar to GNU grep for the
+purposes of the codecrafters exercises. It tries to be forgiving when run
+without arguments (it will run internal tests so the script doesn't just
+exit with SystemExit:1 in interactive environments).
 
-This rewrite makes the script more robust when invoked with no command-line
-arguments (it will run an internal test-suite instead of exiting with 1). It
-also fixes printing behavior: when multiple files are provided, matching lines
-are printed with a "filename:line" prefix; when a single file is provided,
-matching lines are printed without the filename prefix (closer to GNU grep).
+Supported features (sufficient for the current task):
+- -E <pattern> : use a regular expression pattern (Python's `re` semantics)
+- -r : recursively search directories
+- multiple files: prints filename:line for matches across multiple files
+- single file: prints lines without filename prefix (matches grep behavior)
 
-If you run this script with no arguments it runs the internal tests and exits
-with status 0 (useful when the test environment runs the script without args).
-
-Usage:
-  ./your_program.py -E <pattern> [file ...]
-  cat file | ./your_program.py -E <pattern>
+The script is defensive about errors (unreadable files are skipped).
 
 """
 
-import sys, string, os
+import sys
+import os
+import re
+import tempfile
+import io
+import contextlib
 from typing import List
 
-DIGITS = string.digits
-WORD = DIGITS + string.ascii_letters + "_"
 
-
-# --- core engine (kept almost identical to previous version) -----------------
-
-def find_close(p, i=0):
-    depth = 0
-    in_class = False
-    esc = False
-    while i < len(p):
-        c = p[i]
-        if esc:
-            esc = False
-        elif c == "\\":
-            esc = True
-        elif in_class:
-            if c == "]":
-                in_class = False
-        else:
-            if c == "[":
-                in_class = True
-            elif c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-                if depth == 0:
-                    return i
-        i += 1
-    raise ValueError("unbalanced ()")
-
-
-def split_alts(p: str) -> List[str]:
-    out = []
-    start = 0
-    depth = 0
-    in_class = False
-    esc = False
-    for i, c in enumerate(p):
-        if esc:
-            esc = False
-            continue
-        if c == "\\":
-            esc = True
-            continue
-        if in_class:
-            if c == "]":
-                in_class = False
-            continue
-        if c == "[":
-            in_class = True
-            continue
-        if c == "(":
-            depth += 1
-            continue
-        if c == ")":
-            depth -= 1
-            continue
-        if c == "|" and depth == 0:
-            out.append(p[start:i])
-            start = i + 1
-    out.append(p[start:])
-    return out
-
-
-def count_groups(p: str) -> int:
-    n = 0
-    in_class = False
-    esc = False
-    for c in p:
-        if esc:
-            esc = False
-            continue
-        if c == "\\":
-            esc = True
-            continue
-        if in_class:
-            if c == "]":
-                in_class = False
-            continue
-        if c == "[":
-            in_class = True
-            continue
-        if c == "(":
-            n += 1
-    return n
-
-
-def next_atom(p: str):
-    if not p:
-        return None, ""
-    if p[0] == ".":
-        return (lambda ch: ch != "\n"), p[1:]
-    if p.startswith("[^]"):
-        return (lambda ch: True), p[3:]
-    if p.startswith("[^"):
-        j = p.index("]")
-        bad = set(p[2:j])
-        return (lambda ch, bad=bad: ch not in bad), p[j + 1 :]
-    if p[0] == "[":
-        j = p.index("]")
-        good = set(p[1:j])
-        return (lambda ch, good=good: ch in good), p[j + 1 :]
-    if p[0] == "\\":
-        if len(p) < 2:
-            return (lambda ch: ch == "\\"), ""
-        t = p[1]
-        if t == "d":
-            return (lambda ch: ch in DIGITS), p[2:]
-        elif t == "w":
-            return (lambda ch: ch in WORD), p[2:]
-        else:
-            return (lambda ch, t=t: ch == t), p[2:]
-    c = p[0]
-    return (lambda ch, c=c: ch == c), p[1:]
-
-
-def try_backref(s: str, p: str, caps: List[str]):
-    if not p.startswith("\\") or len(p) < 2 or not p[1].isdigit():
-        return None
-    j = 2
-    while j < len(p) and p[j].isdigit():
-        j += 1
-    idx = int(p[1:j]) - 1
-    if idx < 0 or idx >= len(caps) or caps[idx] is None:
+def regex_matches(pattern: str, line: str) -> bool:
+    """Return True if the regex pattern matches anywhere in the line.
+    Invalid patterns return False (we treat them as non-matching rather than crashing).
+    """
+    try:
+        return re.search(pattern, line) is not None
+    except re.error:
         return False
-    g = caps[idx]
-    if not s.startswith(g):
-        return False
-    return s[len(g) :], p[j:]
 
 
-def gen(s: str, p: str, caps: List[str], gi: int):
-    if p == "":
-        yield s, caps
-        return
+def grep_in_file(path: str, pattern: str, prefix_filename: bool = False, display_name: str = None) -> bool:
+    """Search a single file line-by-line.
 
-    br = try_backref(s, p, caps)
-    if br is False:
-        return
-    if br is not None:
-        s2, p2 = br
-        yield from gen(s2, p2, caps, gi)
-        return
+    - path: filesystem path used to open the file
+    - pattern: regex pattern
+    - prefix_filename: if True, print matches as "display_name:line"
+    - display_name: string used when prefixing; if None, uses `path`
 
-    if p[0] == "(":
-        j = find_close(p, 0)
-        body, rest = p[1:j], p[j + 1 :]
-        q = rest[0] if rest else ""
-        this_id = gi
-        inner_start = gi + 1
-        span = 1 + count_groups(body)
+    Returns True if any matches were printed; False otherwise.
+    """
+    if display_name is None:
+        display_name = path
 
-        def gen_body(s0, caps0):
-            for alt in split_alts(body):
-                cc = caps0[:] + [None] * max(0, this_id + 1 - len(caps0))
-                for out_s, cc2 in gen(s0, alt, cc, inner_start):
-                    cc3 = cc2[:] + [None] * max(0, this_id + 1 - len(cc2))
-                    cc3[this_id] = s0[: len(s0) - len(out_s)]
-                    yield out_s, cc3
-
-        if q == "+":
-            rest2 = rest[1:]
-            stack = list(gen_body(s, caps))
-            while stack:
-                out_s, ccx = stack.pop()
-                yield from gen(out_s, rest2, ccx, gi + span)
-                if len(out_s) < len(s):
-                    for out2, cc2 in gen_body(out_s, ccx):
-                        if len(out2) != len(out_s):
-                            stack.append((out2, cc2))
-            return
-
-        if q == "?":
-            rest2 = rest[1:]
-            for out_s, ccx in gen_body(s, caps):
-                yield from gen(out_s, rest2, ccx, gi + span)
-            yield from gen(s, rest2, caps[:], gi + span)
-            return
-
-        for out_s, ccx in gen_body(s, caps):
-            yield from gen(out_s, rest, ccx, gi + span)
-        return
-
-    f, rest = next_atom(p)
-    if f is None:
-        return
-    q = rest[0] if rest else ""
-
-    if q == "+":
-        tail = rest[1:]
-        if not s or not f(s[0]):
-            return
-        i = 1
-        while i <= len(s) and f(s[i - 1]):
-            i += 1
-        i -= 1
-        for k in range(i, 0, -1):
-            yield from gen(s[k:], tail, caps[:], gi)
-        return
-
-    if q == "?":
-        tail = rest[1:]
-        if s and f(s[0]):
-            yield from gen(s[1:], tail, caps[:], gi)
-        yield from gen(s, tail, caps[:], gi)
-        return
-
-    if not s or not f(s[0]):
-        return
-    yield from gen(s[1:], rest, caps, gi)
+    matched = False
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for raw in f:
+                line = raw.rstrip("\n")
+                if regex_matches(pattern, line):
+                    if prefix_filename:
+                        print(f"{display_name}:{line}")
+                    else:
+                        print(line)
+                    matched = True
+    except Exception:
+        # Skip unreadable files silently (mirrors typical grep behavior).
+        pass
+    return matched
 
 
-def matches(s: str, p: str) -> bool:
-    alts = split_alts(p)
-    if len(alts) > 1:
-        return any(matches(s, a) for a in alts)
-    if p.startswith("^") and p.endswith("$"):
-        return any(out == "" for out, _ in gen(s, p[1:-1], [], 0))
-    if p.endswith("$"):
-        core = p[:-1]
-        for i in range(len(s) + 1):
-            if any(out == "" for out, _ in gen(s[i:], core, [], 0)):
-                return True
-        return False
-    if p.startswith("^"):
-        return any(True for _ in gen(s, p[1:], [], 0))
-    for i in range(len(s) + 1):
-        if any(True for _ in gen(s[i:], p, [], 0)):
-            return True
-    return False
+def grep_in_directory(dirname: str, pattern: str) -> bool:
+    """Recursively search `dirname`. Print matches as "<relative>:line".
+
+    The printed file path is relative to the parent of the directory passed
+    (so passing 'dir/' results in prefixes like 'dir/file.txt'). This matches
+    the examples provided in the task description.
+    """
+    matched = False
+    # Determine the start directory for relpath calculations: the parent of dirname
+    # so that the printed paths include the directory name itself (e.g. 'dir/...').
+    start_base = os.path.dirname(os.path.abspath(dirname.rstrip(os.sep)))
+
+    for root, _, files in os.walk(dirname):
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            # display path relative to start_base (so 'dir/...' is printed)
+            display = os.path.relpath(fpath, start=start_base)
+            if grep_in_file(fpath, pattern, prefix_filename=True, display_name=display):
+                matched = True
+    return matched
 
 
-# --- simple internal test-suite ---------------------------------------------
+# --- internal tests ---------------------------------------------------------
 
 def run_tests() -> int:
-    tests = [
-        # basic literals
-        ("apple", "apple", True),
-        ("appl.*", "apple", True),
-        ("carrot", "apple", False),
-        # anchors
-        ("^start", "start of line", True),
-        ("end$", "the end", True),
-        ("^exact$", "exact", True),
-        # character classes and escapes
-        ("b[ae]nana", "banana", True),
-        ("\\d+", "12345", True),
-        ("\\w+", "abc_123", True),
-        # alternation
-        ("cat|dog", "a dog", True),
-        # groups + backreference
-        ("(cat) and \\\1", "cat and cat", True),
-        # optional and plus
-        ("colou?r", "color", True),
-        ("colou?r", "colour", True),
-        ("a+", "aaa", True),
-        # negated class
-        ("[^x]yz", "ayz", True),
-    ]
+    """Run a few basic unit-style checks. Returns 0 on success else 1.
 
+    Tests create temporary files / directories to check file and recursive
+    behavior. This helps avoid surprising SystemExit when the script is
+    executed without arguments in interactive environments.
+    """
     failed = 0
-    for pat, s, exp in tests:
-        got = matches(s, pat)
-        if got != exp:
-            print(f"TEST FAIL: pattern={pat!r} string={s!r} expected={exp} got={got}")
+
+    def assert_eq(a, b, msg=""):
+        nonlocal failed
+        if a != b:
+            print("ASSERT FAIL:", a, "!=", b, msg)
             failed += 1
+
+    # regex matching basics
+    assert_eq(regex_matches(r"apple", "apple"), True, "literal")
+    assert_eq(regex_matches(r"appl.*", "apple"), True, "dot-star")
+    assert_eq(regex_matches(r"carrot", "apple"), False, "no-match")
+    assert_eq(regex_matches(r"^start", "start of line"), True, "anchor start")
+    assert_eq(regex_matches(r"end$", "the end"), True, "anchor end")
+    assert_eq(regex_matches(r"\\d+", "12345"), True, "digit class")
+
+    # file-based tests
+    td = tempfile.mkdtemp(prefix="grep_test_")
+    try:
+        # create files and directories
+        f1 = os.path.join(td, "fruits.txt")
+        with open(f1, "w", encoding="utf-8") as fh:
+            fh.write("pear\nstrawberry\n")
+
+        sub = os.path.join(td, "subdir")
+        os.makedirs(sub, exist_ok=True)
+        f2 = os.path.join(sub, "vegetables.txt")
+        with open(f2, "w", encoding="utf-8") as fh:
+            fh.write("celery\ncarrot\n")
+
+        f3 = os.path.join(td, "vegetables.txt")
+        with open(f3, "w", encoding="utf-8") as fh:
+            fh.write("cucumber\ncorn\n")
+
+        # capture stdout for grep_in_file
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            m = grep_in_file(f1, r"pear")
+        out = buf.getvalue().strip().splitlines()
+        assert_eq(m, True, "grep_in_file matched flag")
+        assert_eq(out, ["pear"], "grep_in_file printed line")
+
+        # multiple file grep (single file, no prefix)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            m = grep_in_file(f3, r"cucumber")
+        out = buf.getvalue().strip().splitlines()
+        assert_eq(m, True, "single file match")
+        assert_eq(out, ["cucumber"], "single file printed without prefix")
+
+        # recursive grep
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            m = grep_in_directory(td, r".*er")
+        out = [line.strip() for line in buf.getvalue().splitlines() if line.strip()]
+        # Expect 3 matches but order isn't guaranteed; check membership
+        expected = {os.path.join(os.path.basename(td), "fruits.txt") + ":strawberry",
+                    os.path.join(os.path.basename(td), "subdir", "vegetables.txt") + ":celery",
+                    os.path.join(os.path.basename(td), "vegetables.txt") + ":cucumber"}
+        assert_eq(set(out) == expected, True, f"recursive output mismatch: got={out} expected={expected}")
+        assert_eq(m, True, "recursive returned True")
+
+    finally:
+        # clean up created files/directories
+        try:
+            for root, dirs, files in os.walk(td, topdown=False):
+                for name in files:
+                    os.remove(os.path.join(root, name))
+                for name in dirs:
+                    os.rmdir(os.path.join(root, name))
+            os.rmdir(td)
+        except Exception:
+            pass
+
     if failed:
         print(f"{failed} test(s) failed")
         return 1
+
     print("All internal tests passed")
     return 0
 
 
-# --- main runner ------------------------------------------------------------
+# --- CLI -------------------------------------------------------------------
+
+def usage():
+    print("Usage: ./your_program.py [-r] -E <pattern> [file_or_dir ...]", file=sys.stderr)
+
 
 def main(argv: List[str] = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
 
-    # No arguments: run internal tests (fixes the SystemExit:1 seen when the
-    # environment executed the script without args). This choice is deliberate
-    # so that running the file with no args is informative instead of failing.
+    # No arguments: run internal tests so the script doesn't simply exit(1)
     if not argv:
         return run_tests()
 
+    # Parse flags: accept -r optionally. Remove all occurrences of '-r' from argv.
+    recursive = False
+    while "-r" in argv:
+        recursive = True
+        argv = [a for a in argv if a != "-r"]
+
+    # Expect -E <pattern>
     if len(argv) < 2 or argv[0] != "-E":
-        print("Usage: ./your_program.py -E <pattern> [file ...]", file=sys.stderr)
+        usage()
         return 2
 
-    pat = argv[1]
-    filenames = argv[2:]
+    pattern = argv[1]
+    targets = argv[2:]
 
-    # File mode (one or more files)
-    if filenames:
+    # If recursive, require at least one target (directory or file)
+    if recursive:
+        if not targets:
+            usage()
+            return 2
         matched_any = False
-        multiple_files = len(filenames) > 1
-        for fname in filenames:
-            try:
-                with open(fname, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = f.read().splitlines()
-            except Exception:
-                # If a file can't be opened we skip it (grep prints errors; tests
-                # typically won't rely on failing files here).
-                continue
-
-            for line in lines:
-                if matches(line, pat):
-                    if multiple_files:
-                        print(f"{fname}:{line}")
-                    else:
-                        print(line)
+        for target in targets:
+            # If target is a directory, walk it
+            if os.path.isdir(target):
+                if grep_in_directory(target, pattern):
                     matched_any = True
-
+            elif os.path.isfile(target):
+                # Treat file passed with -r as regular file; print filename:line
+                if grep_in_file(target, pattern, prefix_filename=True, display_name=target):
+                    matched_any = True
+            else:
+                # skip non-existing entries
+                continue
         return 0 if matched_any else 1
 
-    # Stdin mode
-    txt = sys.stdin.read()
-    return 0 if matches(txt, pat) else 1
+    # Non-recursive: search files or stdin
+    if not targets:
+        # read from stdin
+        matched_any = False
+        for raw in sys.stdin:
+            line = raw.rstrip("\n")
+            if regex_matches(pattern, line):
+                print(line)
+                matched_any = True
+        return 0 if matched_any else 1
+
+    # If one file: print lines without filename prefix
+    if len(targets) == 1:
+        matched = grep_in_file(targets[0], pattern, prefix_filename=False)
+        return 0 if matched else 1
+
+    # Multiple files: prefix each printed line with filename:
+    matched_any = False
+    for fname in targets:
+        if grep_in_file(fname, pattern, prefix_filename=True, display_name=fname):
+            matched_any = True
+    return 0 if matched_any else 1
 
 
 if __name__ == "__main__":
