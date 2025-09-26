@@ -60,24 +60,27 @@ def match_here(tokens, s, idx):
     if ttype == "ANCHOR_END":
         return idx == len(s)
 
-        if ttype == "PLUS":
+    if ttype == "PLUS":
         inner = val
         # Must match at least once
         if idx >= len(s) or not match_token(inner, s[idx]):
             return False
 
-        # Try longest to shortest match (greedy but with backtracking)
+        # Consume as many as possible
         j = idx
         while j < len(s) and match_token(inner, s[j]):
             j += 1
 
-        # Now backtrack from longest to shortest
+        # Backtrack from longest to shortest
         for k in range(j, idx, -1):
             if match_here(tokens[1:], s, k):
                 return True
-
         return False
 
+    if idx < len(s) and match_token((ttype, val), s[idx]):
+        return match_here(tokens[1:], s, idx + 1)
+
+    return False
 
 def match_pattern(input_line, pattern):
     tokens = tokenize(pattern)
