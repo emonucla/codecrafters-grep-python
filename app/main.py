@@ -52,14 +52,14 @@ class DigitMatcher(Matcher):
         return "DigitMatcher()"
 
 
-class AlphanumericMatcher(Matcher):
+class WordMatcher(Matcher):
     def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        if state.pos < len(line) and line[state.pos].isalnum():
+        if state.pos < len(line) and (line[state.pos].isalnum() or line[state.pos] == '_'):
             return {MatchState(state.pos + 1, state.groups)}
         return set()
 
     def __str__(self) -> str:
-        return "AlphanumericMatcher()"
+        return "WordMatcher()"
 
 
 class SequenceMatcher(Matcher):
@@ -73,8 +73,8 @@ class SequenceMatcher(Matcher):
         states = {state}
         for matcher in self.matchers:
             next_states = set()
-            for state in states:
-                next_states |= matcher.match(line, state)
+            for st in states:
+                next_states |= matcher.match(line, st)
             states = next_states
             if not states:
                 break
@@ -89,7 +89,7 @@ class SequenceMatcher(Matcher):
 
 
 class AlternationMatcher(Matcher):
-    def __init__(self, left: Type[Matcher], right: Type[Matcher]):
+    def __init__(self, left: Matcher, right: Matcher):
         self.left = left
         self.right = right
 
@@ -101,7 +101,7 @@ class AlternationMatcher(Matcher):
 
 
 class OptionalMatcher(Matcher):
-    def __init__(self, matcher: Type[Matcher]):
+    def __init__(self, matcher: Matcher):
         self.matcher = matcher
 
     def match(self, line: str, state: MatchState) -> Set[MatchState]:
@@ -112,7 +112,7 @@ class OptionalMatcher(Matcher):
 
 
 class PlusMatcher(Matcher):
-    def __init__(self, matcher: Type[Matcher]):
+    def __init__(self, matcher: Matcher):
         self.matcher = matcher
 
     def match(self, line: str, state: MatchState) -> Set[MatchState]:
@@ -120,8 +120,8 @@ class PlusMatcher(Matcher):
         last_iter_states = states
         while last_iter_states:
             next_states = set()
-            for state in last_iter_states:
-                next_states |= self.matcher.match(line, state)
+            for st in last_iter_states:
+                next_states |= self.matcher.match(line, st)
             states |= next_states
             last_iter_states = next_states
         return states
@@ -133,7 +133,7 @@ class PlusMatcher(Matcher):
 class AnchorStartMatcher(Matcher):
     def match(self, line: str, state: MatchState) -> Set[MatchState]:
         if state.pos == 0:
-            return {MatchState(0, state.groups)}
+            return {state}
         return set()
 
     def __str__(self) -> str:
@@ -143,7 +143,7 @@ class AnchorStartMatcher(Matcher):
 class AnchorEndMatcher(Matcher):
     def match(self, line: str, state: MatchState) -> Set[MatchState]:
         if state.pos == len(line):
-            return {MatchState(state.pos, state.groups)}
+            return {state}
         return set()
 
     def __str__(self) -> str:
@@ -168,10 +168,13 @@ class CharClassMatcher(Matcher):
     def match(self, line: str, state: MatchState) -> Set[MatchState]:
         if state.pos >= len(line):
             return set()
-        if self.is_negated and line[state.pos] not in self.charset:
-            return {MatchState(state.pos + 1, state.groups)}
-        if not self.is_negated and line[state.pos] in self.charset:
-            return {MatchState(state.pos + 1, state.groups)}
+        ch = line[state.pos]
+        if self.is_negated:
+            if ch not in self.charset:
+                return {MatchState(state.pos + 1, state.groups)}
+        else:
+            if ch in self.charset:
+                return {MatchState(state.pos + 1, state.groups)}
         return set()
 
     def __str__(self) -> str:
@@ -179,19 +182,22 @@ class CharClassMatcher(Matcher):
 
 
 class CaptureGroupMatcher(Matcher):
-    def __init__(self, matcher: Type[Matcher], group_id: int):
+    def __init__(self, matcher: Matcher, group_id: int):
         self.matcher = matcher
         self.group_id = group_id
 
     def match(self, line: str, state: MatchState) -> Set[MatchState]:
         next_states = self.matcher.match(line, state)
+        result = set()
         for next_state in next_states:
-            next_state.groups = deepcopy(next_state.groups)
-            next_state.groups[self.group_id] = line[state.pos : next_state.pos]
-        return next_states
+            new_groups = dict(next_state.groups)
+            new_groups[self.group_id] = line[state.pos:next_state.pos]
+            result.add(MatchState(next_state.pos, new_groups))
+        return result
 
     def __str__(self) -> str:
         return f"CaptureGroupMatcher({self.matcher}, {self.group_id})"
+
 
 class BackreferenceMatcher(Matcher):
     def __init__(self, group_id: int):
@@ -200,8 +206,9 @@ class BackreferenceMatcher(Matcher):
     def match(self, line: str, state: MatchState) -> Set[MatchState]:
         if self.group_id in state.groups:
             group_match = state.groups[self.group_id]
-            if line[state.pos : state.pos + len(group_match)] == group_match:
-                return {MatchState(state.pos + len(group_match), state.groups)}
+            match_len = len(group_match)
+            if state.pos + match_len <= len(line) and line[state.pos:state.pos + match_len] == group_match:
+                return {MatchState(state.pos + match_len, state.groups)}
         return set()
 
     def __str__(self) -> str:
@@ -225,13 +232,13 @@ class PatternParser:
             self.i += 1
         return c
 
-    def parse(self) -> Type[Matcher]:
+    def parse(self) -> Matcher:
         res = self.parse_expression()
         if self.peek() is not None:
             raise ValueError("Unexpected characters")
         return res
 
-    def parse_expression(self) -> Type[Matcher]:
+    def parse_expression(self) -> Matcher:
         left = self.parse_term()
         while self.peek() == "|":
             self.advance()
@@ -239,7 +246,7 @@ class PatternParser:
             left = AlternationMatcher(left, right)
         return left
 
-    def parse_term(self) -> Type[Matcher]:
+    def parse_term(self) -> Matcher:
         parts = []
         while (c := self.peek()) is not None and c not in ["|", ")"]:
             parts.append(self.parse_factor())
@@ -247,7 +254,7 @@ class PatternParser:
             return parts[0]
         return SequenceMatcher(parts)
 
-    def parse_factor(self) -> Type[Matcher]:
+    def parse_factor(self) -> Matcher:
         atom = self.parse_atom()
         if (quantifier := self.peek()) in ["?", "+"]:
             self.advance()
@@ -257,7 +264,7 @@ class PatternParser:
                 return PlusMatcher(atom)
         return atom
 
-    def parse_atom(self) -> Type[Matcher]:
+    def parse_atom(self) -> Matcher:
         c = self.peek()
         if c is None:
             raise ValueError("Unexpected end of pattern")
@@ -276,16 +283,16 @@ class PatternParser:
 
         if c == "\\":
             self.advance()
-            c = self.advance()
-            if c.isdigit():
-                return BackreferenceMatcher(int(c))
-            if c == "d":
+            next_c = self.advance()
+            if next_c is None:
+                raise ValueError("Incomplete escape")
+            if next_c.isdigit():
+                return BackreferenceMatcher(int(next_c))
+            if next_c == "d":
                 return DigitMatcher()
-            if c == "w":
-                return AlphanumericMatcher()
-            if c == "\\":
-                return LiteralMatcher("\\")
-            return LiteralMatcher(c)
+            if next_c == "w":
+                return WordMatcher()
+            return LiteralMatcher(next_c)
 
         if c == "[":
             return self.parse_charset()
@@ -303,8 +310,8 @@ class PatternParser:
 
         return LiteralMatcher(self.advance())
 
-    def parse_charset(self) -> Type[Matcher]:
-        assert self.advance() == "["
+    def parse_charset(self) -> Matcher:
+        self.advance()  # consume [
         is_negated = False
         if self.peek() == "^":
             is_negated = True
@@ -317,29 +324,25 @@ class PatternParser:
         return CharClassMatcher(charset, is_negated)
 
 
-def match_pattern(input_line, pattern):
+def match_pattern(input_line: str, pattern: str) -> bool:
     parser = PatternParser(pattern)
     matcher = parser.parse()
-
-    for pos in range(len(input_line)):
-        end_pos = matcher.match(input_line, MatchState(pos, {}))
-        if end_pos:
-            return True
-    return False
+    states = matcher.match(input_line, MatchState(0, {}))
+    return any(s.pos == len(input_line) for s in states)
 
 
 def main():
+    if len(sys.argv) != 3 or sys.argv[1] != "-E":
+        print("Usage: ./your_program.py -E <pattern>")
+        sys.exit(1)
+
     pattern = sys.argv[2]
     input_line = sys.stdin.read()
 
-    if sys.argv[1] != "-E":
-        print("Expected first argument to be '-E'")
-        exit(1)
-
     if match_pattern(input_line, pattern):
-        exit(0)
+        sys.exit(0)
     else:
-        exit(1)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
