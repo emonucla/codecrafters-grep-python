@@ -26,23 +26,27 @@ def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
     while i < n:
         c = pattern[i]
         if c == "\\" and i + 1 < n:
-            nxt = pattern[i + 1]
-            if nxt.isdigit():
-                group_num = int(nxt)
-                current_alt.append(("BACKREF", group_num))
-                i += 2
-                continue
-            elif nxt == "d":
+            j = i + 1
+            if pattern[j] == "d":
                 current_alt.append(("DIGIT", None))
-                i += 2
+                i = j + 1
                 continue
-            elif nxt == "w":
+            elif pattern[j] == "w":
                 current_alt.append(("WORD", None))
-                i += 2
+                i = j + 1
+                continue
+            elif pattern[j].isdigit():
+                k = j + 1
+                while k < n and pattern[k].isdigit():
+                    k += 1
+                group_num = int(pattern[j:k])
+                current_alt.append(("BACKREF", group_num))
+                i = k
                 continue
             else:
-                current_alt.append(("LITERAL", nxt))
-                i += 2
+                escaped = pattern[j]
+                current_alt.append(("LITERAL", escaped))
+                i = j + 1
                 continue
         elif c == ".":
             current_alt.append(("DOT", None))
