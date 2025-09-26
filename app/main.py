@@ -222,15 +222,12 @@ def match(tokens, s):
     n = len(s)
     if tokens and tokens[0][0] == "START":
         res = match_here(tokens, s, 0, {})
-        if res is None:
-            return False
-        pos, _ = res
-        return pos == n
-    res = match_here(tokens, s, 0, {})
-    if res is None:
-        return False
-    pos, _ = res
-    return pos == n
+        return res is not None
+    for i in range(n + 1):
+        res = match_here(tokens, s, i, {})
+        if res is not None:
+            return True
+    return False
 
 
 if __name__ == "__main__":
