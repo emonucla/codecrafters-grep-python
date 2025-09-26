@@ -233,8 +233,6 @@ def matches(s, p):
 
 
 def main():
-    import sys, os
-
     if len(sys.argv) < 3 or sys.argv[1] != "-E":
         sys.exit(1)
 
@@ -244,14 +242,17 @@ def main():
     if len(sys.argv) >= 4:
         try:
             with open(sys.argv[3], "r", encoding="utf-8", errors="ignore") as f:
-                line = f.read().splitlines()[0]  # single-line file
+                lines = f.read().splitlines()
         except Exception:
             sys.exit(1)
 
-        if matches(line, pat):
-            os.write(1, (line + "\n").encode("utf-8"))  # unbuffered stdout
-            sys.exit(0)
-        sys.exit(1)
+        matched = False
+        for line in lines:
+            if matches(line, pat):
+                print(line)
+                matched = True
+
+        sys.exit(0 if matched else 1)
 
     # Stdin mode
     txt = sys.stdin.read()
