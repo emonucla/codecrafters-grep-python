@@ -21,6 +21,9 @@ def tokenize(pattern: str):
             else:
                 tokens.append(("POS_GROUP", set(content)))
             i = end + 1
+        elif pattern[i] == "$" and i == len(pattern) - 1:
+            tokens.append(("ANCHOR_END", None))
+            i += 1
         else:
             tokens.append(("LIT", pattern[i]))
             i += 1
@@ -45,31 +48,52 @@ def match_token(token, ch):
 def match_pattern(input_line, pattern):
     tokens = tokenize(pattern)
 
-    anchored = tokens and tokens[0][0] == "ANCHOR_START"
-    if anchored:
-        tokens = tokens[1:]  # drop the anchor
+    anchored_start = tokens and tokens[0][0] == "ANCHOR_START"
+    anchored_end   = tokens and tokens[-1][0] == "ANCHOR_END"
+
+    if anchored_start:
+        tokens = tokens[1:]
+    if anchored_end:
+        tokens = tokens[:-1]
 
     n, m = len(input_line), len(tokens)
 
-    if anchored:
-        # must match at beginning
+    if anchored_start and anchored_end:
+        # must match full string
+        if m != n:
+            return False
+        for j, token in enumerate(tokens):
+            if not match_token(token, input_line[j]):
+                return False
+        return True
+
+    if anchored_start:
         if m > n:
             return False
         for j, token in enumerate(tokens):
             if not match_token(token, input_line[j]):
                 return False
         return True
-    else:
-        # try all possible start positions
-        for start in range(n - m + 1):
-            ok = True
-            for j, token in enumerate(tokens):
-                if not match_token(token, input_line[start + j]):
-                    ok = False
-                    break
-            if ok:
-                return True
-        return False
+
+    if anchored_end:
+        if m > n:
+            return False
+        start = n - m
+        for j, token in enumerate(tokens):
+            if not match_token(token, input_line[start + j]):
+                return False
+        return True
+
+    # No anchors: search anywhere
+    for start in range(n - m + 1):
+        ok = True
+        for j, token in enumerate(tokens):
+            if not match_token(token, input_line[start + j]):
+                ok = False
+                break
+        if ok:
+            return True
+    return False
 
 def main():
     if len(sys.argv) < 3 or sys.argv[1] != "-E":
