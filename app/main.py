@@ -151,34 +151,23 @@ def match_here(tokens, s, idx, captures):
 
     if ttype == "CAPTURE":
         group_id, sub_tokens = val
-
-        # Try matching sub_tokens in every possible way
-        sub_stack = [(idx, captures.copy())]
-        tried = set()
-        while sub_stack:
-            sub_idx, sub_caps = sub_stack.pop()
-            if (sub_idx, tuple(sorted(sub_caps.items()))) in tried:
-                continue
-            tried.add((sub_idx, tuple(sorted(sub_caps.items()))))
-
-            sub_res = match_here(sub_tokens, s, sub_idx, sub_caps)
-            if sub_res is None:
-                continue
-            sub_pos, sub_captures = sub_res
-            new_captures = sub_captures.copy()
-            new_captures[group_id] = s[idx:sub_pos]
-
-            rest_res = match_here(tokens[1:], s, sub_pos, new_captures)
-            if rest_res is not None:
-                return rest_res
-
+        sub_res = match_here(sub_tokens, s, idx, captures)
+        if sub_res is None:
+            return None
+        sub_pos, sub_captures = sub_res
+        new_captures = sub_captures.copy()
+        new_captures[group_id] = (idx, sub_pos)
+        rest_res = match_here(tokens[1:], s, sub_pos, new_captures)
+        if rest_res is not None:
+            return rest_res
         return None
 
     if ttype == "BACKREF":
         group_num = val
         if group_num not in captures:
             return None
-        captured_str = captures[group_num]
+        cap_start, cap_end = captures[group_num]
+        captured_str = s[cap_start:cap_end]
         clen = len(captured_str)
         if idx + clen > n or s[idx:idx + clen] != captured_str:
             return None
@@ -200,15 +189,14 @@ def match_here(tokens, s, idx, captures):
     if ttype == "QUESTION":
         inner = val
         # Try one first (greedy)
+        res = None
         if idx < n and match_token(inner, s[idx]):
-            rest_res = match_here(tokens[1:], s, idx + 1, captures)
-            if rest_res is not None:
-                return rest_res
+            res = match_here(tokens[1:], s, idx + 1, captures)
+            if res is not None:
+                return res
         # Try zero
-        rest_res = match_here(tokens[1:], s, idx, captures)
-        if rest_res is not None:
-            return rest_res
-        return None
+        res = match_here(tokens[1:], s, idx, captures)
+        return res
 
     if ttype == "OR":
         for alt in val:
@@ -228,11 +216,11 @@ def match_here(tokens, s, idx, captures):
 
 def match(tokens, s):
     n = len(s)
-    res = match_here(tokens, s, 0, {})
-    if res is None:
-        return False
-    pos, _ = res
-    return pos == n
+    for i in range(n + 1):
+        res = match_here(tokens, s, i, {})
+        if res is not None:
+            return True
+    return False
 
 
 if __name__ == "__main__":
