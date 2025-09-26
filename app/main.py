@@ -49,48 +49,41 @@ def match_token(token, ch):
         return ch in val
     if ttype == "NEG_GROUP":
         return ch not in val
-    raise RuntimeError(f"Unexpected token type: {ttype}")
+    return False
 
 def match_here(tokens, s, idx):
-    """Try to match tokens against s starting at position idx."""
     if not tokens:
-        return idx == len(s)  # must consume full string if at end
+        return idx == len(s)
 
     ttype, val = tokens[0]
 
-    # End anchor
     if ttype == "ANCHOR_END":
         return idx == len(s)
 
-    # PLUS quantifier
     if ttype == "PLUS":
         inner = val
-        # Must match at least once
+        # must match at least once
         if idx >= len(s) or not match_token(inner, s[idx]):
             return False
         j = idx
-        # Consume as many as possible
         while j < len(s) and match_token(inner, s[j]):
-            # Try rest of pattern after consuming k chars
             if match_here(tokens[1:], s, j + 1):
                 return True
             j += 1
         return False
 
-    # Normal token
     if idx < len(s) and match_token((ttype, val), s[idx]):
         return match_here(tokens[1:], s, idx + 1)
+
     return False
 
 def match_pattern(input_line, pattern):
     tokens = tokenize(pattern)
-
     anchored_start = tokens and tokens[0][0] == "ANCHOR_START"
     if anchored_start:
         tokens = tokens[1:]
         return match_here(tokens, input_line, 0)
 
-    # Unanchored: try all start positions
     for start in range(len(input_line) + 1):
         if match_here(tokens, input_line, start):
             return True
@@ -103,8 +96,6 @@ def main():
 
     pattern = sys.argv[2]
     input_line = sys.stdin.read()
-
-    print("Logs from your program will appear here!", file=sys.stderr)
 
     if match_pattern(input_line, pattern):
         exit(0)
