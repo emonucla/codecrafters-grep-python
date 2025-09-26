@@ -18,29 +18,9 @@ def match_token(token, ch):
     return False
 
 
-def match_or(alt_lists, s, idx, captures, open_groups):
-    """Match any alternative in an OR."""
-    for alt in alt_lists:
-        res = match_here(alt, s, idx, captures, open_groups)
-        if res is not None:
-            return res
-    return None
-
-
-def match_sub(sub, s, idx, captures, open_groups):
-    """Match a subpattern which is either a list (sequence) or OR."""
+def match_node(node, s, idx, captures):
     n = len(s)
-    if isinstance(sub, list):
-        return match_here(sub, s, idx, captures, open_groups)
-    elif sub[0] == "OR":
-        return match_or(sub[1], s, idx, captures, open_groups)
-    return None
-
-
-def match_atom(token, s, idx, captures, open_groups):
-    """Match a single atom/token tree."""
-    n = len(s)
-    ttype, val = token
+    ttype, val = node
     if ttype == "START":
         if idx != 0:
             return None
@@ -50,157 +30,86 @@ def match_atom(token, s, idx, captures, open_groups):
             return None
         return idx, captures
     if ttype in ["LITERAL", "DOT", "DIGIT", "WORD", "CLASS", "NEG_CLASS"]:
-        if idx >= n or not match_token(token, s[idx]):
+        if idx >= n or not match_token(node, s[idx]):
             return None
         return idx + 1, captures
     if ttype == "BACKREF":
         group_num = val
-        if group_num in captures:
-            cap_start, cap_end = captures[group_num]
-            clen = cap_end - cap_start
-            if idx + clen > n or s[idx:idx + clen] != s[cap_start:cap_end]:
-                return None
-            return idx + clen, captures
-        elif group_num in open_groups:
-            cap_start = open_groups[group_num]
-            plen = idx - cap_start
-            if idx + plen > n or s[idx:idx + plen] != s[cap_start:idx]:
-                return None
-            return idx + plen, captures
-        else:
+        if group_num not in captures:
             return None
+        cap_start, cap_end = captures[group_num]
+        clen = cap_end - cap_start
+        if idx + clen > n or s[idx:idx + clen] != s[cap_start:cap_end]:
+            return None
+        return idx + clen, captures
     if ttype == "CAPTURE":
         group_id, sub_tokens = val
-        new_open = open_groups.copy()
-        new_open[group_id] = idx
-        sub_res = match_sub(sub_tokens, s, idx, captures, new_open)
+        sub_res = match_here(sub_tokens, s, idx, captures)
         if sub_res is None:
             return None
         sub_pos, sub_captures = sub_res
         new_captures = sub_captures.copy()
         new_captures[group_id] = (idx, sub_pos)
-        del new_open[group_id]
         return sub_pos, new_captures
     if ttype == "OR":
-        return match_or(val, s, idx, captures, open_groups)
-    if ttype == "PLUS":
-        inner_token = val
-        res = match_atom(inner_token, s, idx, captures, open_groups)
-        if res is None:
-            return None
-        pos, cap = res
-        while True:
-            next_res = match_atom(inner_token, s, pos, cap, open_groups)
-            if next_res is None:
-                break
-            pos, cap = next_res
-        return pos, cap
-    if ttype == "QUESTION":
-        inner_token = val
-        res = match_atom(inner_token, s, idx, captures, open_groups)
-        if res is not None:
-            return res
-        return idx, captures
+        for alt in val:
+            alt_res = match_here(alt, s, idx, captures)
+            if alt_res is not None:
+                return alt_res
+        return None
     return None
 
 
-def match_here(tokens, s, idx, captures, open_groups):
+def match_here(tokens, s, idx, captures):
     n = len(s)
     if not tokens:
         return idx, captures
 
-    ttype, val = tokens[0]
-
-    if ttype == "START":
-        if idx != 0:
-            return None
-        return match_here(tokens[1:], s, idx, captures, open_groups)
-
-    if ttype == "END":
-        if idx != n:
-            return None
-        return match_here(tokens[1:], s, idx, captures, open_groups)
-
-    if ttype == "CAPTURE":
-        group_id, sub_tokens = val
-        new_open = open_groups.copy()
-        new_open[group_id] = idx
-        sub_res = match_sub(sub_tokens, s, idx, captures, new_open)
-        if sub_res is None:
-            return None
-        sub_pos, sub_captures = sub_res
-        new_captures = sub_captures.copy()
-        new_captures[group_id] = (idx, sub_pos)
-        del new_open[group_id]
-        rest_res = match_here(tokens[1:], s, sub_pos, new_captures, new_open)
-        return rest_res
-
-    if ttype == "OR":
-        or_res = match_or(val, s, idx, captures, open_groups)
-        if or_res is None:
-            return None
-        or_pos, or_captures = or_res
-        return match_here(tokens[1:], s, or_pos, or_captures, open_groups)
-
-    if ttype == "BACKREF":
-        group_num = val
-        if group_num in captures:
-            cap_start, cap_end = captures[group_num]
-            clen = cap_end - cap_start
-            if idx + clen > n or s[idx:idx + clen] != s[cap_start:cap_end]:
-                return None
-            return match_here(tokens[1:], s, idx + clen, captures, open_groups)
-        elif group_num in open_groups:
-            cap_start = open_groups[group_num]
-            plen = idx - cap_start
-            if idx + plen > n or s[idx:idx + plen] != s[cap_start:idx]:
-                return None
-            return match_here(tokens[1:], s, idx + plen, captures, open_groups)
-        else:
-            return None
+    node = tokens[0]
+    ttype, val = node
 
     if ttype == "PLUS":
-        inner_token = val
-        res = match_atom(inner_token, s, idx, captures, open_groups)
+        inner = val
+        res = match_node(inner, s, idx, captures)
         if res is None:
             return None
         pos, cap = res
         possible = [(pos, cap)]
         while True:
-            next_res = match_atom(inner_token, s, pos, cap, open_groups)
+            next_res = match_node(inner, s, pos, cap)
             if next_res is None:
                 break
             pos, cap = next_res
             possible.append((pos, cap))
         for p_pos, p_cap in reversed(possible):
-            rest_res = match_here(tokens[1:], s, p_pos, p_cap, open_groups)
+            rest_res = match_here(tokens[1:], s, p_pos, p_cap)
             if rest_res is not None:
                 return rest_res
         return None
 
     if ttype == "QUESTION":
-        inner_token = val
-        res = match_atom(inner_token, s, idx, captures, open_groups)
+        inner = val
+        res = match_node(inner, s, idx, captures)
         if res is not None:
             q_pos, q_cap = res
-            rest_res = match_here(tokens[1:], s, q_pos, q_cap, open_groups)
+            rest_res = match_here(tokens[1:], s, q_pos, q_cap)
             if rest_res is not None:
                 return rest_res
-        return match_here(tokens[1:], s, idx, captures, open_groups)
+        return match_here(tokens[1:], s, idx, captures)
 
-    # Simple token match
-    if idx >= n or not match_token((ttype, val), s[idx]):
+    res = match_node(node, s, idx, captures)
+    if res is None:
         return None
-    return match_here(tokens[1:], s, idx + 1, captures, open_groups)
+    new_idx, new_captures = res
+    return match_here(tokens[1:], s, new_idx, new_captures)
 
 
 def match(tokens, s):
-    n = len(s)
-    for i in range(n + 1):
-        res = match_here(tokens, s, i, {}, {})
-        if res is not None:
-            return True
-    return False
+    res = match_here(tokens, s, 0, {})
+    if res is None:
+        return False
+    pos, _ = res
+    return pos == len(s)
 
 
 def parse_subpattern(pattern, start, expect_close=False, next_group=[1]):
@@ -327,7 +236,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     pattern = sys.argv[2]
-    input_text = sys.stdin.read()
+    input_text = sys.stdin.read().rstrip('\n')  # Remove trailing newline if any
 
     tokens = tokenize(pattern)
     if match(tokens, input_text):
