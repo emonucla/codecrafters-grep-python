@@ -1,388 +1,261 @@
-import sys
-from abc import ABC, abstractmethod
-from typing import Set, List, Optional, Dict
-from dataclasses import dataclass, field
-
-@dataclass
-class MatchState:
-    pos: int
-    groups: Dict[int, str] = field(compare=False)
-
-    def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, MatchState)
-            and self.pos == other.pos
-            and self.groups == other.groups
-        )
-
-    def __hash__(self) -> int:
-        return hash((self.pos, tuple(sorted(self.groups.items()))))
-
-
-class Matcher(ABC):
-    @abstractmethod
-    def match(self, line: str, state: MatchState) -> Set[MatchState]: ...
-
-
-class LiteralMatcher(Matcher):
-    def __init__(self, char: str):
-        self.char = char
-
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        if state.pos < len(line) and line[state.pos] == self.char:
-            return {MatchState(state.pos + 1, dict(state.groups))}
-        return set()
-
-    def __str__(self) -> str:
-        return f"Literal({self.char})"
-
-
-class DigitMatcher(Matcher):
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        if state.pos < len(line) and line[state.pos].isdigit():
-            return {MatchState(state.pos + 1, dict(state.groups))}
-        return set()
-
-    def __str__(self) -> str:
-        return "DigitMatcher()"
-
-
-class WordMatcher(Matcher):
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        if state.pos < len(line) and (line[state.pos].isalnum() or line[state.pos] == '_'):
-            return {MatchState(state.pos + 1, dict(state.groups))}
-        return set()
-
-    def __str__(self) -> str:
-        return "WordMatcher()"
-
-
-class SequenceMatcher(Matcher):
-    def __init__(self, matchers: List[Matcher]):
-        self.matchers = matchers
-
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        states = {state}
-        for matcher in self.matchers:
-            next_states = set()
-            for st in states:
-                next_states |= matcher.match(line, st)
-            states = next_states
-            if not states:
-                break
-        return states
-
-    def __str__(self) -> str:
-        return (
-            "SequenceMatcher("
-            + ", ".join(str(matcher) for matcher in self.matchers)
-            + ")"
-        )
-
-
-class AlternationMatcher(Matcher):
-    def __init__(self, left: Matcher, right: Matcher):
-        self.left = left
-        self.right = right
-
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        return self.left.match(line, state) | self.right.match(line, state)
-
-    def __str__(self) -> str:
-        return f"AlternationMatcher({self.left}, {self.right})"
-
-
-class OptionalMatcher(Matcher):
-    def __init__(self, matcher: Matcher):
-        self.matcher = matcher
-
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        return self.matcher.match(line, state) | {MatchState(state.pos, dict(state.groups))}
-
-    def __str__(self) -> str:
-        return f"OptionalMatcher({self.matcher})"
-
-
-class PlusMatcher(Matcher):
-    def __init__(self, matcher: Matcher):
-        self.matcher = matcher
-
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        states = self.matcher.match(line, state)
-        if not states:
-            return set()
-        last_iter_states = states
-        while last_iter_states:
-            next_states = set()
-            for st in last_iter_states:
-                next_states |= self.matcher.match(line, st)
-            if not next_states:
-                break
-            states |= next_states
-            last_iter_states = next_states
-        return states
-
-    def __str__(self) -> str:
-        return f"PlusMatcher({self.matcher})"
-
-
-class StarMatcher(Matcher):
-    def __init__(self, matcher: Matcher):
-        self.matcher = matcher
-
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        states = {state}  # zero or more
-        current_states = {state}
-        while current_states:
-            next_states = set()
-            for st in current_states:
-                next_states |= self.matcher.match(line, st)
-            states |= next_states
-            current_states = next_states
-        return states
-
-    def __str__(self) -> str:
-        return f"StarMatcher({self.matcher})"
-
-
-class AnchorStartMatcher(Matcher):
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        if state.pos == 0:
-            return {MatchState(0, dict(state.groups))}
-        return set()
-
-    def __str__(self) -> str:
-        return "AnchorStartMatcher()"
-
-
-class AnchorEndMatcher(Matcher):
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        if state.pos == len(line):
-            return {MatchState(state.pos, dict(state.groups))}
-        return set()
-
-    def __str__(self) -> str:
-        return "AnchorEndMatcher()"
-
-
-class AnyMatcher(Matcher):
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        if state.pos < len(line):
-            return {MatchState(state.pos + 1, dict(state.groups))}
-        return set()
-
-    def __str__(self) -> str:
-        return "AnyMatcher()"
-
-
-class CharClassMatcher(Matcher):
-    def __init__(self, charset: set, is_negated: bool):
-        self.charset = charset
-        self.is_negated = is_negated
-
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        if state.pos >= len(line):
-            return set()
-        ch = line[state.pos]
-        matches = (ch not in self.charset) if self.is_negated else (ch in self.charset)
-        if matches:
-            return {MatchState(state.pos + 1, dict(state.groups))}
-        return set()
-
-    def __str__(self) -> str:
-        return f"CharClassMatcher({self.charset}, {self.is_negated})"
-
-
-class CaptureGroupMatcher(Matcher):
-    def __init__(self, matcher: Matcher, group_id: int):
-        self.matcher = matcher
-        self.group_id = group_id
-
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        next_states = self.matcher.match(line, state)
-        result = set()
-        for next_state in next_states:
-            new_groups = dict(next_state.groups)
-            captured = line[state.pos : next_state.pos]
-            new_groups[self.group_id] = captured
-            result.add(MatchState(next_state.pos, new_groups))
-        return result
-
-    def __str__(self) -> str:
-        return f"CaptureGroupMatcher({self.matcher}, {self.group_id})"
-
-
-class BackreferenceMatcher(Matcher):
-    def __init__(self, group_id: int):
-        self.group_id = group_id
-
-    def match(self, line: str, state: MatchState) -> Set[MatchState]:
-        if self.group_id in state.groups:
-            group_match = state.groups[self.group_id]
-            match_len = len(group_match)
-            if state.pos + match_len <= len(line) and line[state.pos : state.pos + match_len] == group_match:
-                return {MatchState(state.pos + match_len, dict(state.groups))}
-        return set()
-
-    def __str__(self) -> str:
-        return f"BackreferenceMatcher({self.group_id})"
-
-
-class PatternParser:
-    def __init__(self, pattern: str):
-        self.pattern = pattern
-        self.i: int = 0
-        self.next_group_id: int = 1
-
-    def peek(self) -> Optional[str]:
-        if self.i < len(self.pattern):
-            return self.pattern[self.i]
-        return None
-
-    def advance(self) -> Optional[str]:
-        if self.i < len(self.pattern):
-            c = self.pattern[self.i]
-            self.i += 1
-            return c
-        return None
-
-    def parse(self) -> Matcher:
-        res = self.parse_expression()
-        if self.peek() is not None:
-            raise ValueError("Unexpected characters at end of pattern")
-        return res
-
-    def parse_expression(self) -> Matcher:
-        left = self.parse_term()
-        while self.peek() == "|":
-            self.advance()
-            right = self.parse_term()
-            left = AlternationMatcher(left, right)
-        return left
-
-    def parse_term(self) -> Matcher:
-        parts = []
-        while (c := self.peek()) is not None and c not in ["|", ")"]:
-            parts.append(self.parse_factor())
-        if len(parts) == 0:
-            raise ValueError("Empty term in pattern")
-        if len(parts) == 1:
-            return parts[0]
-        return SequenceMatcher(parts)
-
-    def parse_factor(self) -> Matcher:
-        atom = self.parse_atom()
-        quantifier = self.peek()
-        if quantifier in ["?", "+", "*"]:
-            self.advance()
-            if quantifier == "?":
-                return OptionalMatcher(atom)
-            elif quantifier == "+":
-                return PlusMatcher(atom)
-            elif quantifier == "*":
-                return StarMatcher(atom)
-        return atom
-
-    def parse_atom(self) -> Matcher:
-        c = self.peek()
-        if c is None:
-            raise ValueError("Unexpected end of pattern")
-
-        if c == "^":
-            self.advance()
-            return AnchorStartMatcher()
-        if c == "$":
-            self.advance()
-            return AnchorEndMatcher()
-        if c == ".":
-            self.advance()
-            return AnyMatcher()
+#!/usr/bin/env python3
+import sys, string, os
+
+DIGITS = string.digits
+WORD = DIGITS + string.ascii_letters + "_"
+
+
+def find_close(p, i=0):
+    depth = 0
+    in_class = False
+    esc = False
+    while i < len(p):
+        c = p[i]
+        if esc:
+            esc = False
+        elif c == "\\":
+            esc = True
+        elif in_class:
+            if c == "]":
+                in_class = False
+        else:
+            if c == "[":
+                in_class = True
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    return i
+        i += 1
+    raise ValueError("unbalanced ()")
+
+
+def split_alts(p):
+    out = []
+    start = 0
+    depth = 0
+    in_class = False
+    esc = False
+    for i, c in enumerate(p):
+        if esc:
+            esc = False
+            continue
         if c == "\\":
-            self.advance()  # consume \\
-            if self.peek() is None:
-                raise ValueError("Incomplete escape sequence")
-            next_c = self.advance()  # consume the escape character
-            if next_c == "d":
-                return DigitMatcher()
-            elif next_c == "w":
-                return WordMatcher()
-            elif next_c.isdigit():
-                # Collect additional digits for backreference
-                digits = next_c
-                while self.peek() is not None and self.peek().isdigit():
-                    digits += self.advance()
-                group_id = int(digits)
-                return BackreferenceMatcher(group_id)
-            else:
-                # Literal escape
-                return LiteralMatcher(next_c)
+            esc = True
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            continue
         if c == "[":
-            return self.parse_charset()
+            in_class = True
+            continue
         if c == "(":
-            self.advance()
-            group_id = self.next_group_id
-            self.next_group_id += 1
-            expr = self.parse_expression()
-            if self.advance() != ")":
-                raise ValueError("Expected closing parenthesis ')'")
-            return CaptureGroupMatcher(expr, group_id)
-        # Literal character
-        return LiteralMatcher(self.advance())
-
-    def parse_charset(self) -> Matcher:
-        self.advance()  # Consume [
-        is_negated = False
-        if self.peek() == "^":
-            is_negated = True
-            self.advance()
-        charset = set()
-        while self.peek() is not None and self.peek() != "]":
-            c = self.advance()
-            if c == "\\" and self.peek() is not None:
-                # Escaped character in class
-                c = self.advance()
-            charset.add(c)
-        if self.advance() != "]":
-            raise ValueError("Expected closing bracket '']'")
-        return CharClassMatcher(charset, is_negated)
+            depth += 1
+            continue
+        if c == ")":
+            depth -= 1
+            continue
+        if c == "|" and depth == 0:
+            out.append(p[start:i])
+            start = i + 1
+    out.append(p[start:])
+    return out
 
 
-def match_pattern(input_line: str, pattern: str) -> bool:
-    try:
-        parser = PatternParser(pattern)
-        matcher = parser.parse()
-        n = len(input_line)
-        for start_pos in range(n + 1):
-            initial_state = MatchState(start_pos, {})
-            states = matcher.match(input_line, initial_state)
-            if states:
+def count_groups(p):
+    n = 0
+    in_class = False
+    esc = False
+    for c in p:
+        if esc:
+            esc = False
+            continue
+        if c == "\\":
+            esc = True
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            continue
+        if c == "[":
+            in_class = True
+            continue
+        if c == "(":
+            n += 1
+    return n
+
+
+def next_atom(p):
+    if not p:
+        return None, ""
+    if p[0] == ".":
+        return (lambda ch: ch != "\n"), p[1:]
+    if p.startswith("[^]"):
+        return (lambda ch: True), p[3:]
+    if p.startswith("[^"):
+        j = p.index("]")
+        bad = set(p[2:j])
+        return (lambda ch, bad=bad: ch not in bad), p[j + 1 :]
+    if p[0] == "[":
+        j = p.index("]")
+        good = set(p[1:j])
+        return (lambda ch, good=good: ch in good), p[j + 1 :]
+    if p[0] == "\\":
+        if len(p) < 2:
+            return (lambda ch: ch == "\\"), ""
+        t = p[1]
+        if t == "d":
+            return (lambda ch: ch in DIGITS), p[2:]
+        elif t == "w":
+            return (lambda ch: ch in WORD), p[2:]
+        else:
+            return (lambda ch, t=t: ch == t), p[2:]
+    c = p[0]
+    return (lambda ch, c=c: ch == c), p[1:]
+
+
+def try_backref(s, p, caps):
+    if not p.startswith("\\") or len(p) < 2 or not p[1].isdigit():
+        return None
+    j = 2
+    while j < len(p) and p[j].isdigit():
+        j += 1
+    idx = int(p[1:j]) - 1
+    if idx < 0 or idx >= len(caps) or caps[idx] is None:
+        return False
+    g = caps[idx]
+    if not s.startswith(g):
+        return False
+    return s[len(g) :], p[j:]
+
+
+def gen(s, p, caps, gi):
+    if p == "":
+        yield s, caps
+        return
+
+    br = try_backref(s, p, caps)
+    if br is False:
+        return
+    if br is not None:
+        s2, p2 = br
+        yield from gen(s2, p2, caps, gi)
+        return
+
+    if p[0] == "(":
+        j = find_close(p, 0)
+        body, rest = p[1:j], p[j + 1 :]
+        q = rest[0] if rest else ""
+        this_id = gi
+        inner_start = gi + 1
+        span = 1 + count_groups(body)
+
+        def gen_body(s0, caps0):
+            for alt in split_alts(body):
+                cc = caps0[:] + [None] * max(0, this_id + 1 - len(caps0))
+                for out_s, cc2 in gen(s0, alt, cc, inner_start):
+                    cc3 = cc2[:] + [None] * max(0, this_id + 1 - len(cc2))
+                    cc3[this_id] = s0[: len(s0) - len(out_s)]
+                    yield out_s, cc3
+
+        if q == "+":
+            rest2 = rest[1:]
+            stack = list(gen_body(s, caps))
+            while stack:
+                out_s, ccx = stack.pop()
+                yield from gen(out_s, rest2, ccx, gi + span)
+                if len(out_s) < len(s):
+                    for out2, cc2 in gen_body(out_s, ccx):
+                        if len(out2) != len(out_s):
+                            stack.append((out2, cc2))
+            return
+
+        if q == "?":
+            rest2 = rest[1:]
+            for out_s, ccx in gen_body(s, caps):
+                yield from gen(out_s, rest2, ccx, gi + span)
+            yield from gen(s, rest2, caps[:], gi + span)
+            return
+
+        for out_s, ccx in gen_body(s, caps):
+            yield from gen(out_s, rest, ccx, gi + span)
+        return
+
+    f, rest = next_atom(p)
+    if f is None:
+        return
+    q = rest[0] if rest else ""
+
+    if q == "+":
+        tail = rest[1:]
+        if not s or not f(s[0]):
+            return
+        i = 1
+        while i <= len(s) and f(s[i - 1]):
+            i += 1
+        i -= 1
+        for k in range(i, 0, -1):
+            yield from gen(s[k:], tail, caps[:], gi)
+        return
+
+    if q == "?":
+        tail = rest[1:]
+        if s and f(s[0]):
+            yield from gen(s[1:], tail, caps[:], gi)
+        yield from gen(s, tail, caps[:], gi)
+        return
+
+    if not s or not f(s[0]):
+        return
+    yield from gen(s[1:], rest, caps, gi)
+
+
+def matches(s, p):
+    alts = split_alts(p)
+    if len(alts) > 1:
+        return any(matches(s, a) for a in alts)
+    if p.startswith("^") and p.endswith("$"):
+        return any(out == "" for out, _ in gen(s, p[1:-1], [], 0))
+    if p.endswith("$"):
+        core = p[:-1]
+        for i in range(len(s) + 1):
+            if any(out == "" for out, _ in gen(s[i:], core, [], 0)):
                 return True
         return False
-    except ValueError as e:
-        print(f"Pattern parsing error: {e}", file=sys.stderr)
-        return False
+    if p.startswith("^"):
+        return any(True for _ in gen(s, p[1:], [], 0))
+    for i in range(len(s) + 1):
+        if any(True for _ in gen(s[i:], p, [], 0)):
+            return True
+    return False
 
 
 def main():
-    if len(sys.argv) < 4 or sys.argv[1] != "-E":
-        print("Usage: ./your_program.py -E <pattern> <filename>", file=sys.stderr)
+    import sys, os
+
+    if len(sys.argv) < 3 or sys.argv[1] != "-E":
         sys.exit(1)
 
-    pattern = sys.argv[2]
-    filename = sys.argv[3]
+    pat = sys.argv[2]
 
-    try:
-        with open(filename, 'r') as f:
-            input_line = f.readline().rstrip('\n')
-    except IOError as e:
-        print(f"Error reading file: {e}", file=sys.stderr)
+    # File mode
+    if len(sys.argv) >= 4:
+        try:
+            with open(sys.argv[3], "r", encoding="utf-8", errors="ignore") as f:
+                line = f.read().splitlines()[0]  # single-line file
+        except Exception:
+            sys.exit(1)
+
+        if matches(line, pat):
+            os.write(1, (line + "\n").encode("utf-8"))  # unbuffered stdout
+            sys.exit(0)
         sys.exit(1)
 
-    if match_pattern(input_line, pattern):
-        print(input_line)
-        sys.exit(0)
-    else:
-        sys.exit(1)
+    # Stdin mode
+    txt = sys.stdin.read()
+    sys.exit(0 if matches(txt, pat) else 1)
 
 
 if __name__ == "__main__":
